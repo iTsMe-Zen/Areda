@@ -1,0 +1,9 @@
+Initial public release.
+
+- EPUB reading support
+- TXT reading support
+- PDF reading support
+- Basic plain-text note support
+- Local library access
+- Saved reading progress
+- Offline-only design

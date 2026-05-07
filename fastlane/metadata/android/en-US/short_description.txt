@@ -1,0 +1,1 @@
+A lightweight offline EPUB, TXT, and PDF reader.
