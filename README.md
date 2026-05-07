@@ -1,8 +1,8 @@
 # Areada
 
-Areada is a lightweight offline reader app for Android, focused on simple local reading without unnecessary features, tracking, or internet access.
+Areada is a minimal offline Android reader focused on lightweight local reading.
 
-It is designed for users who want a fast, minimal reader for personal documents and ebooks.
+It supports EPUB, TXT, and PDF files, with a clean monochrome interface, local library access, saved reading progress, and basic plain-text note support.
 
 ## Supported Formats
 
@@ -12,19 +12,18 @@ It is designed for users who want a fast, minimal reader for personal documents 
 
 ## Features
 
-- Clean Jetpack Compose interface
-- Minimal monochrome visual style
-- Local library management
-- Folder-based file access using Android's Storage Access Framework
-- Recent documents shelf
-- Saved reading progress
-- Resume reading from the last opened position
+- Clean Jetpack Compose UI
+- Minimal monochrome visual theme
+- EPUB, TXT, and PDF file support
+- Basic local note support using plain `.txt` files
+- Storage Access Framework folder picker so users choose exactly which folders are visible
+- Recent documents shelf stored locally
+- Saved reading progress so reopened files resume where you left off
 - Reader settings for theme, font family, and font size
-- EPUB chapter extraction and rendering
-- TXT reading support
-- PDF reading using Android's built-in `PdfRenderer`
-- Pinch-to-zoom support for EPUB and PDF reading
-- Offline-only design
+- EPUB extraction and chapter rendering without a heavy external reader SDK
+- Pinch-to-zoom reading for EPUB and PDF
+- PDF rendering through Android's built-in `PdfRenderer`
+- Offline-only reading
 - No internet permission
 - No device-wide automatic scanning
 - No ads
