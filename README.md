@@ -1,32 +1,43 @@
 # Areada
 
-Minimal Android reader focused on two formats only:
+Areada is a lightweight offline reader app for Android, focused on simple local reading without unnecessary features, tracking, or internet access.
+
+It is designed for users who want a fast, minimal reader for personal documents and ebooks.
+
+## Supported Formats
 
 - EPUB
+- TXT
 - PDF
 
-## What is included
+## Features
 
-- Jetpack Compose UI with a monochrome visual theme
-- Storage Access Framework folder picker so the user chooses exactly which library paths are visible
-- Recent documents shelf stored locally
-- Saved reading progress so reopened files resume where you left off
+- Clean Jetpack Compose interface
+- Minimal monochrome visual style
+- Local library management
+- Folder-based file access using Android's Storage Access Framework
+- Recent documents shelf
+- Saved reading progress
+- Resume reading from the last opened position
 - Reader settings for theme, font family, and font size
-- EPUB extraction and chapter rendering without a heavy external reader SDK
-- Pinch-to-zoom reading for EPUB and PDF
-- PDF rendering through Android's built-in `PdfRenderer`
-- Offline-only reading with no internet permission and no device-wide scanning
+- EPUB chapter extraction and rendering
+- TXT reading support
+- PDF reading using Android's built-in `PdfRenderer`
+- Pinch-to-zoom support for EPUB and PDF reading
+- Offline-only design
+- No internet permission
+- No device-wide automatic scanning
+- No ads
+- No analytics
+- No tracking
 
-## Build note
+## Privacy
 
-This machine did not have `java`, `javac`, or `gradle` available during setup, so the project includes Gradle configuration and wrapper properties but not a generated `gradle-wrapper.jar`.
+Areada is designed to work fully offline.
 
-To build in Android Studio:
+The app does not collect, upload, sell, or share user data. Files opened in the app remain on the user's device. The app does not require internet permission.
 
-1. Open `Areada`.
-2. Let Android Studio install or point to a JDK if needed.
-3. Regenerate the Gradle wrapper or sync with a local Gradle/JDK setup.
+## Package Name
 
-## Package
-
-`app.areada`
+```txt
+app.areada
