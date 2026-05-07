@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+build/
+*/build/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+
+# Local machine files
+local.properties
+
+# Signing keys - NEVER upload these
+*.jks
+*.keystore
+keystore.properties
+
+# Android release outputs
+*.apk
+*.aab
+*.apks
+
+# OS junk
+.DS_Store
+Thumbs.db
