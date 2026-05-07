@@ -38,7 +38,7 @@ The app does not collect, upload, sell, or share user data. Files opened in the 
 
 ## Screenshots
 
-| Library | Reader | Settings | Notes |
+| Library | Swipe Right Actions | Settings | Notes |
 |---|---|---|---|
 | ![Library screen](screenshots/1.jpg) | ![Reader screen](screenshots/2.jpg) | ![Settings screen](screenshots/3.jpg) | ![Notes screen](screenshots/4.jpg) |
 
