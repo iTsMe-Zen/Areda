@@ -14,7 +14,7 @@ Areada supports EPUB, TXT, and PDF files, with a clean monochrome interface, loc
 
 ## Latest Release
 
-Latest version: **v1.0.2**
+Latest version: **v1.0.5**
 
 Download APK from the latest GitHub release:
 
@@ -28,23 +28,16 @@ https://github.com/iTsMe-Zen/Areada/releases/latest
 
 ## Features
 
-- Clean Jetpack Compose UI
-- Minimal monochrome visual theme
-- EPUB, TXT, and PDF file support
-- Basic local note support using plain `.txt` files
-- Storage Access Framework folder picker so users choose exactly which folders are visible
-- Recent documents shelf stored locally
-- Saved reading progress so reopened files resume where you left off
-- Reader settings for theme, font family, and font size
-- EPUB extraction and chapter rendering without a heavy external reader SDK
-- Pinch-to-zoom reading for EPUB and PDF
-- PDF rendering through Android's built-in `PdfRenderer`
-- Offline-only reading
-- No internet permission
-- No device-wide automatic scanning
-- No ads
-- No analytics
-- No tracking
+## Features
+
+- **Local reading:** EPUB, TXT, and PDF support with saved reading progress
+- **Bookmarks:** Persistent local bookmarks for EPUB, PDF, and TXT files
+- **Navigation:** EPUB chapter table of contents, PDF page navigation, and quick bookmark access from Home
+- **Reader controls:** Theme, font family, font size, and pinch-to-zoom support
+- **Notes:** Create and edit basic local `.txt` notes for simple note keeping
+- **File access:** Storage Access Framework folder picker with no device-wide automatic scanning
+- **Offline-first:** No internet permission, no ads, no analytics, and no tracking
+- **Lightweight design:** Clean Jetpack Compose UI with a minimal monochrome interface
 
 ## Privacy
 
