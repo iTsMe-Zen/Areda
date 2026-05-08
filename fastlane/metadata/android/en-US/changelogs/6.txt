@@ -1,0 +1,6 @@
+Reproducible build metadata cleanup.
+
+- Removed dependency metadata from APK signing block.
+- Improved F-Droid reproducible build compatibility.
+- No app behavior changes.
+- Still offline-first with no internet permission.
