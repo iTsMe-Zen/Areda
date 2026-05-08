@@ -1,4 +1,7 @@
-# Areada
+<h1>
+  <img src="assets/logo.png" alt="Areada logo" width="42" />
+  Areada
+</h1>
 
 Areada is a minimal offline Android reader focused on lightweight local reading.
 
@@ -48,9 +51,10 @@ The app does not collect, upload, sell, or share user data. Files opened in the 
 
 | Library | Swipe Right Actions | Settings | Notes |
 |---|---|---|---|
-| ![Library screen](screenshots/1.jpg) | ![Reader screen](screenshots/2.jpg) | ![Settings screen](screenshots/3.jpg) | ![Notes screen](screenshots/4.jpg) |
+| ![Library screen](screenshots/1.jpg) | ![Swipe right actions screen](screenshots/2.jpg) | ![Settings screen](screenshots/3.jpg) | ![Notes screen](screenshots/4.jpg) |
 
 ## Package Name
 
 ```txt
 app.areada
+```
