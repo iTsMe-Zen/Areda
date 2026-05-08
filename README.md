@@ -1,10 +1,16 @@
-<p>
+<p align="center">
   <img src="assets/logo.png" alt="Areada" width="190" />
 </p>
 
-Areada is a minimal offline Android reader focused on lightweight local reading.
+<p align="center">
+  <b>Areada</b>
+</p>
 
-It supports EPUB, TXT, and PDF files, with a clean monochrome interface, local library access, saved reading progress, and basic plain-text note support.
+<p align="center">
+  A minimal offline Android reader focused on lightweight local reading.
+</p>
+
+Areada supports EPUB, TXT, and PDF files, with a clean monochrome interface, local library access, saved reading progress, and basic plain-text note support.
 
 ## Latest Release
 
@@ -48,31 +54,23 @@ The app does not collect, upload, sell, or share user data. Files opened in the 
 
 ## Screenshots
 
-<table>
-  <tr>
-    <td align="center">
-      <img src="screenshots/1.jpg" alt="Reading Mode" width="220" /><br />
-      <sub>Library</sub>
-    </td>
-    <td align="center">
-      <img src="screenshots/2.jpg" alt="Swipe right action" width="220" /><br />
-      <sub>Swipe Actions</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <img src="screenshots/3.jpg" alt="Settings screen" width="220" /><br />
-      <sub>Settings</sub>
-    </td>
-    <td align="center">
-      <img src="screenshots/4.jpg" alt="Notes screen" width="220" /><br />
-      <sub>Notes</sub>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <img src="screenshots/1.jpg" alt="Library screen" width="175" />
+  <img src="screenshots/2.jpg" alt="Swipe actions screen" width="175" />
+  <img src="screenshots/3.jpg" alt="Settings screen" width="175" />
+  <img src="screenshots/4.jpg" alt="Notes screen" width="175" />
+</p>
+
+<p align="center">
+  <sub>
+    <b>Library</b> ·
+    <b>Swipe Actions</b> ·
+    <b>Settings</b> ·
+    <b>Notes</b>
+  </sub>
+</p>
 
 ## Package Name
 
 ```txt
 app.areada
-```
