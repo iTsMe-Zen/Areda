@@ -1,6 +1,6 @@
-<h1>
-  <img src="assets/logo.png" alt="Areada logo" width="38" height="38"> Areada
-</h1>
+<p>
+  <img src="assets/logo.png" alt="Areada" width="190" />
+</p>
 
 Areada is a minimal offline Android reader focused on lightweight local reading.
 
