@@ -48,9 +48,28 @@ The app does not collect, upload, sell, or share user data. Files opened in the 
 
 ## Screenshots
 
-| Library | Swipe Right Actions | Settings | Notes |
-|---|---|---|---|
-| ![Library screen](screenshots/1.jpg) | ![Swipe right actions screen](screenshots/2.jpg) | ![Settings screen](screenshots/3.jpg) | ![Notes screen](screenshots/4.jpg) |
+<table>
+  <tr>
+    <td align="center">
+      <img src="screenshots/1.jpg" alt="Reading Mode" width="220" /><br />
+      <sub>Library</sub>
+    </td>
+    <td align="center">
+      <img src="screenshots/2.jpg" alt="Swipe right action" width="220" /><br />
+      <sub>Swipe Actions</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="screenshots/3.jpg" alt="Settings screen" width="220" /><br />
+      <sub>Settings</sub>
+    </td>
+    <td align="center">
+      <img src="screenshots/4.jpg" alt="Notes screen" width="220" /><br />
+      <sub>Notes</sub>
+    </td>
+  </tr>
+</table>
 
 ## Package Name
 
