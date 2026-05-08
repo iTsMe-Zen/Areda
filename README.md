@@ -4,6 +4,14 @@ Areada is a minimal offline Android reader focused on lightweight local reading.
 
 It supports EPUB, TXT, and PDF files, with a clean monochrome interface, local library access, saved reading progress, and basic plain-text note support.
 
+## Latest Release
+
+Latest version: **v1.0.1**
+
+Download APK from the latest GitHub release:
+
+https://github.com/iTsMe-Zen/Areada/releases/latest
+
 ## Supported Formats
 
 - EPUB
