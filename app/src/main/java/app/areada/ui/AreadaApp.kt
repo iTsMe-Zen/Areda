@@ -56,10 +56,13 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDropDown
+import androidx.compose.material.icons.outlined.Bookmark
+import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.FormatListBulleted
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.ImportContacts
 import androidx.compose.material.icons.outlined.LibraryBooks
@@ -133,10 +136,14 @@ import app.areada.data.LibrarySortMode
 import app.areada.data.ReaderFontChoice
 import app.areada.data.ReaderPreferences
 import app.areada.data.ReaderRenderPalette
+import app.areada.data.ReadingBookmark
 import app.areada.data.ReaderThemeMode
 import app.areada.data.ReadingProgress
 import app.areada.data.RecentDocument
 import app.areada.data.renderPalette
+import app.areada.data.epubBookmarkId
+import app.areada.data.pdfBookmarkId
+import app.areada.data.txtBookmarkId
 import app.areada.reader.EpubChapter
 import app.areada.reader.EpubEngine
 import app.areada.reader.PdfPageRenderer
@@ -216,6 +223,7 @@ fun AreadaApp(viewModel: ReaderViewModel = viewModel()) {
                         searchResults = uiState.searchResults,
                         isSearching = uiState.isSearching,
                         recents = uiState.recents,
+                        bookmarks = uiState.bookmarks,
                         preferences = uiState.preferences,
                         sortMode = uiState.librarySortMode,
                         progressByUri = uiState.progressByUri,
@@ -230,6 +238,7 @@ fun AreadaApp(viewModel: ReaderViewModel = viewModel()) {
                         onOpenFolder = { relativePath -> viewModel.openLibraryFolder(context, relativePath) },
                         onOpenBook = { book -> viewModel.openLibraryBook(context, book) },
                         onOpenRecent = { recent -> viewModel.reopenRecent(context, recent) },
+                        onOpenBookmark = { bookmark -> viewModel.openBookmark(context, bookmark) },
                         onRemoveRecent = { recent -> viewModel.removeRecent(context, recent) },
                         onSortModeChange = { sortMode -> viewModel.updateLibrarySortMode(context, sortMode) },
                         onDeleteFolder = { folder -> viewModel.deleteLibraryFolder(context, folder) },
@@ -246,9 +255,20 @@ fun AreadaApp(viewModel: ReaderViewModel = viewModel()) {
                     is ReaderScreen.Epub -> EpubReaderScreen(
                         screen = screen,
                         preferences = uiState.preferences,
+                        bookmarks = uiState.bookmarks,
                         onBack = viewModel::closeReader,
                         onPreferencesChange = { preferences ->
                             viewModel.updatePreferences(context, preferences)
+                        },
+                        onToggleBookmark = { chapterIndex, chapterCount, scrollFraction, chapterTitle ->
+                            viewModel.toggleEpubBookmark(
+                                context = context,
+                                document = screen.document,
+                                chapterIndex = chapterIndex,
+                                chapterCount = chapterCount,
+                                scrollFraction = scrollFraction,
+                                chapterTitle = chapterTitle,
+                            )
                         },
                         onSaveProgress = { chapterIndex, chapterCount, scrollFraction ->
                             viewModel.saveEpubProgress(
@@ -264,9 +284,18 @@ fun AreadaApp(viewModel: ReaderViewModel = viewModel()) {
                     is ReaderScreen.Pdf -> PdfReaderScreen(
                         screen = screen,
                         preferences = uiState.preferences,
+                        bookmarks = uiState.bookmarks,
                         onBack = viewModel::closeReader,
                         onPreferencesChange = { preferences ->
                             viewModel.updatePreferences(context, preferences)
+                        },
+                        onToggleBookmark = { pageIndex, pageCount ->
+                            viewModel.togglePdfBookmark(
+                                context = context,
+                                document = screen.document,
+                                pageIndex = pageIndex,
+                                pageCount = pageCount,
+                            )
                         },
                         onSaveProgress = { pageIndex, pageCount, zoomScale ->
                             viewModel.savePdfProgress(
@@ -282,12 +311,19 @@ fun AreadaApp(viewModel: ReaderViewModel = viewModel()) {
                     is ReaderScreen.Text -> TextReaderScreen(
                         screen = screen,
                         preferences = uiState.preferences,
+                        bookmarks = uiState.bookmarks,
                         onBack = viewModel::closeReader,
                         onPreferencesChange = { preferences ->
                             viewModel.updatePreferences(context, preferences)
                         },
                         onSaveText = { text ->
                             viewModel.saveTextDocument(context, screen.document, text)
+                        },
+                        onSaveProgress = { scrollFraction ->
+                            viewModel.saveTextProgress(context, screen.document, scrollFraction)
+                        },
+                        onToggleBookmark = { scrollFraction ->
+                            viewModel.toggleTextBookmark(context, screen.document, scrollFraction)
                         },
                         onDiscardText = {
                             viewModel.discardTextDocument(context, screen.document, screen.deleteOnDiscard)
@@ -329,6 +365,7 @@ private fun HomeScreen(
     searchResults: List<LibrarySearchResult>,
     isSearching: Boolean,
     recents: List<RecentDocument>,
+    bookmarks: List<ReadingBookmark>,
     preferences: ReaderPreferences,
     sortMode: LibrarySortMode,
     progressByUri: Map<String, ReadingProgress>,
@@ -343,6 +380,7 @@ private fun HomeScreen(
     onOpenFolder: (String) -> Unit,
     onOpenBook: (LibraryBookEntry) -> Unit,
     onOpenRecent: (RecentDocument) -> Unit,
+    onOpenBookmark: (ReadingBookmark) -> Unit,
     onRemoveRecent: (RecentDocument) -> Unit,
     onSortModeChange: (LibrarySortMode) -> Unit,
     onDeleteFolder: (LibraryFolderEntry) -> Unit,
@@ -360,6 +398,9 @@ private fun HomeScreen(
         mutableStateOf(false)
     }
     var showFolderPicker by rememberSaveable {
+        mutableStateOf(false)
+    }
+    var showBookmarks by rememberSaveable {
         mutableStateOf(false)
     }
     var actionTarget by remember {
@@ -383,6 +424,7 @@ private fun HomeScreen(
         ReaderSettingsSheet(
             preferences = preferences,
             showPdfNote = false,
+            showReadingControls = false,
             onDismiss = { showSettings = false },
             onPreferencesChange = onPreferencesChange,
         )
@@ -601,6 +643,13 @@ private fun HomeScreen(
                         )
                     }
                 }
+                Spacer(modifier = Modifier.height(12.dp))
+                BookmarksSection(
+                    bookmarks = bookmarks,
+                    expanded = showBookmarks,
+                    onToggleExpanded = { showBookmarks = !showBookmarks },
+                    onOpenBookmark = onOpenBookmark,
+                )
                 Spacer(modifier = Modifier.height(12.dp))
                 SearchBar(
                     query = searchQuery,
@@ -1140,6 +1189,9 @@ private fun FolderPickerDropdown(
             Icon(
                 imageVector = Icons.Outlined.ArrowDropDown,
                 contentDescription = if (expanded) "Close folder menu" else "Open folder menu",
+                modifier = Modifier.graphicsLayer {
+                    rotationZ = if (expanded) 180f else 0f
+                },
             )
         }
     }
@@ -1242,6 +1294,69 @@ private fun SearchBar(
     )
 }
 
+@Composable
+private fun BookmarksSection(
+    bookmarks: List<ReadingBookmark>,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    onOpenBookmark: (ReadingBookmark) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onToggleExpanded)
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            SectionHeader(title = "Bookmarks")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = bookmarks.size.toString(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Icon(
+                    imageVector = Icons.Outlined.ArrowDropDown,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.graphicsLayer {
+                        rotationZ = if (expanded) 180f else 0f
+                    },
+                )
+            }
+        }
+        if (expanded) {
+            Spacer(modifier = Modifier.height(6.dp))
+            if (bookmarks.isEmpty()) {
+                InfoCard(message = "No bookmarks yet.")
+            } else {
+                bookmarks.take(20).forEach { bookmark ->
+                    BookmarkRow(
+                        bookmark = bookmark,
+                        onClick = { onOpenBookmark(bookmark) },
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BookmarkRow(
+    bookmark: ReadingBookmark,
+    onClick: () -> Unit,
+) {
+    BookRow(
+        title = bookmark.title,
+        type = bookmark.type,
+        progressLabel = bookmark.positionLabel,
+        pinned = false,
+        onClick = onClick,
+    )
+}
 @Composable
 private fun SearchResults(
     results: List<LibrarySearchResult>,
@@ -1571,11 +1686,16 @@ private fun RenameDialog(
 private fun EpubReaderScreen(
     screen: ReaderScreen.Epub,
     preferences: ReaderPreferences,
+    bookmarks: List<ReadingBookmark>,
     onBack: () -> Unit,
     onPreferencesChange: (ReaderPreferences) -> Unit,
+    onToggleBookmark: (chapterIndex: Int, chapterCount: Int, scrollFraction: Float, chapterTitle: String) -> Unit,
     onSaveProgress: (chapterIndex: Int, chapterCount: Int, scrollFraction: Float) -> Unit,
 ) {
     var showSettings by rememberSaveable(screen.document.uriString) {
+        mutableStateOf(false)
+    }
+    var showToc by rememberSaveable(screen.document.uriString) {
         mutableStateOf(false)
     }
     var isFullMode by remember(screen.document.uriString) {
@@ -1591,7 +1711,7 @@ private fun EpubReaderScreen(
         mutableStateOf(false)
     }
     var chapterIndex by rememberSaveable(screen.document.uriString, screen.initialChapterIndex) {
-        mutableIntStateOf(screen.initialChapterIndex)
+        mutableIntStateOf(screen.initialChapterIndex.coerceIn(0, screen.book.chapters.lastIndex.coerceAtLeast(0)))
     }
     var scrollFraction by rememberSaveable(
         screen.document.uriString,
@@ -1607,49 +1727,18 @@ private fun EpubReaderScreen(
         mutableStateOf<String?>(null)
     }
     val renderPalette = rememberReaderRenderPalette(preferences.themeMode)
-    val latestChapterIndex by rememberUpdatedState(chapterIndex)
-    val latestScrollFraction by rememberUpdatedState(scrollFraction)
-
-    DisposableEffect(screen.document.uriString) {
-        onDispose {
-            onSaveProgress(latestChapterIndex, screen.book.chapters.size, latestScrollFraction)
-        }
-    }
-
-    LaunchedEffect(screen.document.uriString, chapterIndex, preferences, renderPalette) {
-        renderedChapter = null
-        chapterError = null
-        runCatching {
-            EpubEngine.render(
-                book = screen.book,
-                chapterIndex = chapterIndex,
-                preferences = preferences,
-                paletteOverride = renderPalette,
+    val tocEntries = remember(screen.book.chapters) {
+        screen.book.chapters.mapIndexed { index, chapter ->
+            ReaderTocEntry(
+                index = index,
+                label = chapter.title.ifBlank { "Chapter ${index + 1}" },
             )
         }
-            .onSuccess { chapter ->
-                renderedChapter = chapter
-            }
-            .onFailure { throwable ->
-                chapterError = displayError(throwable, "Unable to render this chapter.")
-            }
     }
-
-    if (showSettings) {
-        ReaderSettingsSheet(
-            preferences = preferences,
-            showPdfNote = false,
-            onDismiss = { showSettings = false },
-            onPreferencesChange = onPreferencesChange,
-        )
-    }
-
-    KeepReaderScreenAwake(enabled = preferences.keepScreenOn)
-    LaunchedEffect(isFullMode) {
-        fullControlsVisible = false
-    }
-    val showReaderChrome = !isFullMode || fullControlsVisible
-    ReaderStatusBarHidden(hidden = !showReaderChrome)
+    val currentBookmarkId = epubBookmarkId(screen.document.uriString, chapterIndex, scrollFraction)
+    val currentBookmarked = bookmarks.any { it.id == currentBookmarkId }
+    val latestChapterIndex by rememberUpdatedState(chapterIndex)
+    val latestScrollFraction by rememberUpdatedState(scrollFraction)
 
     fun switchToChapter(nextIndex: Int) {
         if (nextIndex !in screen.book.chapters.indices || nextIndex == chapterIndex) {
@@ -1685,6 +1774,39 @@ private fun EpubReaderScreen(
         return true
     }
 
+    DisposableEffect(screen.document.uriString) {
+        onDispose {
+            onSaveProgress(latestChapterIndex, screen.book.chapters.size, latestScrollFraction)
+        }
+    }
+
+    LaunchedEffect(screen.document.uriString, chapterIndex, preferences, renderPalette) {
+        renderedChapter = null
+        chapterError = null
+        runCatching {
+            EpubEngine.render(
+                book = screen.book,
+                chapterIndex = chapterIndex,
+                preferences = preferences,
+                paletteOverride = renderPalette,
+            )
+        }
+            .onSuccess { chapter ->
+                renderedChapter = chapter
+            }
+            .onFailure { throwable ->
+                chapterError = displayError(throwable, "Unable to render this chapter.")
+            }
+    }
+
+    if (showSettings) {
+        ReaderSettingsSheet(
+            preferences = preferences,
+            showPdfNote = false,
+            onDismiss = { showSettings = false },
+            onPreferencesChange = onPreferencesChange,
+        )
+    }
     if (showGoToChapter) {
         GoToPositionDialog(
             label = "Chapter",
@@ -1697,6 +1819,15 @@ private fun EpubReaderScreen(
             },
         )
     }
+    BackHandler(enabled = showToc) {
+        showToc = false
+    }
+    KeepReaderScreenAwake(enabled = preferences.keepScreenOn)
+    LaunchedEffect(isFullMode) {
+        fullControlsVisible = false
+    }
+    val showReaderChrome = !isFullMode || fullControlsVisible
+    ReaderStatusBarHidden(hidden = !showReaderChrome)
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -1757,6 +1888,16 @@ private fun EpubReaderScreen(
                         subtitle = "Chapter ${chapterIndex + 1} of ${screen.book.chapters.size}",
                         onBack = onBack,
                         onSettings = { showSettings = true },
+                        onTableOfContents = { showToc = !showToc },
+                        onBookmarkToggle = {
+                            onToggleBookmark(
+                                chapterIndex,
+                                screen.book.chapters.size,
+                                scrollFraction,
+                                renderedChapter?.title ?: screen.book.chapters[chapterIndex].title,
+                            )
+                        },
+                        isBookmarked = currentBookmarked,
                     )
                 }
                 Box(
@@ -1777,6 +1918,20 @@ private fun EpubReaderScreen(
                 }
             }
 
+            if (showReaderChrome && showToc) {
+                ReaderTocOverlay(
+                    title = "Table of contents",
+                    entries = tocEntries,
+                    currentIndex = chapterIndex,
+                    onDismiss = { showToc = false },
+                    onSelect = { nextIndex ->
+                        switchToChapter(nextIndex)
+                        showToc = false
+                    },
+                    modifier = Modifier.align(Alignment.TopCenter),
+                )
+            }
+
             noteText?.let { note ->
                 NotePopup(
                     note = note,
@@ -1794,8 +1949,10 @@ private fun EpubReaderScreen(
 private fun PdfReaderScreen(
     screen: ReaderScreen.Pdf,
     preferences: ReaderPreferences,
+    bookmarks: List<ReadingBookmark>,
     onBack: () -> Unit,
     onPreferencesChange: (ReaderPreferences) -> Unit,
+    onToggleBookmark: (pageIndex: Int, pageCount: Int) -> Unit,
     onSaveProgress: (pageIndex: Int, pageCount: Int, zoomScale: Float) -> Unit,
 ) {
     val context = LocalContext.current.applicationContext
@@ -1856,6 +2013,9 @@ private fun PdfReaderScreen(
     var showSettings by rememberSaveable(screen.document.uriString) {
         mutableStateOf(false)
     }
+    var showToc by rememberSaveable(screen.document.uriString) {
+        mutableStateOf(false)
+    }
     var isFullMode by remember(screen.document.uriString) {
         mutableStateOf(true)
     }
@@ -1870,6 +2030,15 @@ private fun PdfReaderScreen(
     }
     var zoomScale by rememberSaveable(screen.document.uriString, screen.initialZoomScale) {
         mutableFloatStateOf(screen.initialZoomScale.coerceIn(1f, 5f))
+    }
+    val currentBookmarked = bookmarks.any { it.id == pdfBookmarkId(screen.document.uriString, pageIndex) }
+    val tocEntries = remember(pageCount) {
+        List(pageCount.coerceAtLeast(0)) { index ->
+            ReaderTocEntry(
+                index = index,
+                label = "Page ${index + 1}",
+            )
+        }
     }
 
     DisposableEffect(screen.document.uriString, pageIndex) {
@@ -1898,6 +2067,9 @@ private fun PdfReaderScreen(
                 showGoToPage = false
             },
         )
+    }
+    BackHandler(enabled = showToc) {
+        showToc = false
     }
     KeepReaderScreenAwake(enabled = preferences.keepScreenOn)
     LaunchedEffect(isFullMode) {
@@ -1987,6 +2159,9 @@ private fun PdfReaderScreen(
                         subtitle = "Page ${pageIndex + 1} of $pageCount",
                         onBack = onBack,
                         onSettings = { showSettings = true },
+                        onTableOfContents = { showToc = !showToc },
+                        onBookmarkToggle = { onToggleBookmark(pageIndex, pageCount) },
+                        isBookmarked = currentBookmarked,
                     )
                 }
                 Box(
@@ -1997,7 +2172,7 @@ private fun PdfReaderScreen(
                     ReaderFooter(
                         leftLabel = "Prev",
                         rightLabel = "Next",
-                        centerLabel = "Page ${pageIndex + 1}",
+                        centerLabel = "Pg ${pageIndex + 1}",
                         leftEnabled = pageIndex > 0,
                         rightEnabled = pageIndex < pageCount - 1,
                         onLeft = ::goToPreviousPage,
@@ -2005,6 +2180,20 @@ private fun PdfReaderScreen(
                         onRight = ::goToNextPage,
                     )
                 }
+            }
+            if (showReaderChrome && showToc) {
+                ReaderTocOverlay(
+                    title = "Table of contents",
+                    entries = tocEntries,
+                    currentIndex = pageIndex,
+                    onDismiss = { showToc = false },
+                    onSelect = { nextIndex ->
+                        onSaveProgress(pageIndex, pageCount, zoomScale)
+                        pageIndex = nextIndex.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
+                        showToc = false
+                    },
+                    modifier = Modifier.align(Alignment.TopCenter),
+                )
             }
         }
     }
@@ -2015,9 +2204,12 @@ private fun PdfReaderScreen(
 private fun TextReaderScreen(
     screen: ReaderScreen.Text,
     preferences: ReaderPreferences,
+    bookmarks: List<ReadingBookmark>,
     onBack: () -> Unit,
     onPreferencesChange: (ReaderPreferences) -> Unit,
     onSaveText: (String) -> Unit,
+    onSaveProgress: (Float) -> Unit,
+    onToggleBookmark: (Float) -> Unit,
     onDiscardText: () -> Unit,
     onRenameText: (String, String) -> Unit,
 ) {
@@ -2036,8 +2228,18 @@ private fun TextReaderScreen(
     var saveOnDispose by remember(screen.document.uriString) {
         mutableStateOf(true)
     }
+    val scrollState = rememberScrollState()
+    val currentScrollFraction = if (scrollState.maxValue > 0) {
+        (scrollState.value.toFloat() / scrollState.maxValue.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
     val latestText by rememberUpdatedState(text)
+    val latestScrollFraction by rememberUpdatedState(currentScrollFraction)
     val shouldSaveOnDispose by rememberUpdatedState(saveOnDispose)
+    val currentBookmarked = bookmarks.any {
+        it.id == txtBookmarkId(screen.document.uriString, currentScrollFraction)
+    }
     val renderPalette = rememberReaderRenderPalette(preferences.themeMode)
     val backgroundColor = Color(AndroidColor.parseColor(renderPalette.backgroundHex))
     val textColor = Color(AndroidColor.parseColor(renderPalette.textHex))
@@ -2045,6 +2247,7 @@ private fun TextReaderScreen(
     fun saveAndLeave() {
         saveOnDispose = false
         onSaveText(latestText)
+        onSaveProgress(currentScrollFraction)
         onBack()
     }
 
@@ -2061,7 +2264,14 @@ private fun TextReaderScreen(
         onDispose {
             if (shouldSaveOnDispose) {
                 onSaveText(latestText)
+                onSaveProgress(latestScrollFraction)
             }
+        }
+    }
+
+    LaunchedEffect(screen.document.uriString, screen.initialScrollFraction, scrollState.maxValue) {
+        if (screen.initialScrollFraction > 0f && scrollState.maxValue > 0) {
+            scrollState.scrollTo((scrollState.maxValue * screen.initialScrollFraction.coerceIn(0f, 1f)).roundToInt())
         }
     }
 
@@ -2122,6 +2332,13 @@ private fun TextReaderScreen(
                     TextButton(onClick = ::saveAndLeave) {
                         Text(text = "Save")
                     }
+                    IconButton(onClick = { onToggleBookmark(currentScrollFraction) }) {
+                        Icon(
+                            imageVector = if (currentBookmarked) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder,
+                            contentDescription = if (currentBookmarked) "Remove bookmark" else "Add bookmark",
+                            tint = if (currentBookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
                     IconButton(onClick = { showSettings = true }) {
                         Icon(
                             imageVector = Icons.Outlined.Settings,
@@ -2146,7 +2363,7 @@ private fun TextReaderScreen(
                 },
                 modifier = Modifier
                     .fillMaxSize()
-                    .verticalScroll(rememberScrollState()),
+                    .verticalScroll(scrollState),
                 textStyle = MaterialTheme.typography.bodyLarge.copy(
                     color = textColor,
                     fontFamily = preferences.fontChoice.composeFontFamily(),
@@ -2168,7 +2385,6 @@ private fun TextReaderScreen(
         }
     }
 }
-
 @Composable
 private fun EpubWebView(
     chapter: RenderedChapter,
@@ -2447,6 +2663,7 @@ private fun ZoomablePage(
 private fun ReaderSettingsSheet(
     preferences: ReaderPreferences,
     showPdfNote: Boolean,
+    showReadingControls: Boolean = true,
     onDismiss: () -> Unit,
     onPreferencesChange: (ReaderPreferences) -> Unit,
 ) {
@@ -2534,96 +2751,187 @@ private fun ReaderSettingsSheet(
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(20.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            if (showReadingControls) {
+                Spacer(modifier = Modifier.height(20.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Font size",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        text = "${fontSizeDraft.roundToInt().coerceIn(14, 30)}sp",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Slider(
+                    value = fontSizeDraft,
+                    onValueChange = { value ->
+                        fontSizeDraft = value
+                    },
+                    onValueChangeFinished = {
+                        onPreferencesChange(preferences.copy(fontSizeSp = fontSizeDraft.roundToInt().coerceIn(14, 30)))
+                    },
+                    valueRange = 14f..30f,
+                    steps = 7,
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Line spacing",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        text = "${(lineSpacingDraft * 10f).roundToInt() / 10f}x",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Slider(
+                    value = lineSpacingDraft,
+                    onValueChange = { value ->
+                        lineSpacingDraft = value
+                    },
+                    onValueChangeFinished = {
+                        onPreferencesChange(preferences.copy(lineSpacing = lineSpacingDraft.coerceIn(1.2f, 2.4f)))
+                    },
+                    valueRange = 1.2f..2.4f,
+                    steps = 5,
+                )
+                if (showPdfNote) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Font settings apply to EPUB and TXT. PDF keeps the document's embedded typography.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(modifier = Modifier.height(20.dp))
                 Text(
-                    text = "Font size",
+                    text = "Display",
                     style = MaterialTheme.typography.titleSmall,
                 )
-                Text(
-                    text = "${fontSizeDraft.roundToInt().coerceIn(14, 30)}sp",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Slider(
-                value = fontSizeDraft,
-                onValueChange = { value ->
-                    fontSizeDraft = value
-                },
-                onValueChangeFinished = {
-                    onPreferencesChange(preferences.copy(fontSizeSp = fontSizeDraft.roundToInt().coerceIn(14, 30)))
-                },
-                valueRange = 14f..30f,
-                steps = 7,
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "Line spacing",
-                    style = MaterialTheme.typography.titleSmall,
-                )
-                Text(
-                    text = "${(lineSpacingDraft * 10f).roundToInt() / 10f}x",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Slider(
-                value = lineSpacingDraft,
-                onValueChange = { value ->
-                    lineSpacingDraft = value
-                },
-                onValueChangeFinished = {
-                    onPreferencesChange(preferences.copy(lineSpacing = lineSpacingDraft.coerceIn(1.2f, 2.4f)))
-                },
-                valueRange = 1.2f..2.4f,
-                steps = 5,
-            )
-            if (showPdfNote) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Font settings apply to EPUB and TXT. PDF keeps the document's embedded typography.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Spacer(modifier = Modifier.height(20.dp))
-            Text(
-                text = "Display",
-                style = MaterialTheme.typography.titleSmall,
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                SettingChip(
-                    label = "Follow system",
-                    selected = !preferences.keepScreenOn,
-                    onClick = {
-                        onPreferencesChange(preferences.copy(keepScreenOn = false))
-                    },
-                    modifier = Modifier.weight(1f),
-                )
-                SettingChip(
-                    label = "Always ON",
-                    selected = preferences.keepScreenOn,
-                    onClick = {
-                        onPreferencesChange(preferences.copy(keepScreenOn = true))
-                    },
-                    modifier = Modifier.weight(1f),
-                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    SettingChip(
+                        label = "Follow system",
+                        selected = !preferences.keepScreenOn,
+                        onClick = {
+                            onPreferencesChange(preferences.copy(keepScreenOn = false))
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                    SettingChip(
+                        label = "Always ON",
+                        selected = preferences.keepScreenOn,
+                        onClick = {
+                            onPreferencesChange(preferences.copy(keepScreenOn = true))
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
             Spacer(modifier = Modifier.height(12.dp))
+        }
+    }
+}
+
+private data class ReaderTocEntry(
+    val index: Int,
+    val label: String,
+)
+
+@Composable
+private fun ReaderTocOverlay(
+    title: String,
+    entries: List<ReaderTocEntry>,
+    currentIndex: Int,
+    onDismiss: () -> Unit,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(top = 112.dp)
+            .clickable(onClick = onDismiss),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .heightIn(max = 240.dp)
+                .clickable { },
+            shape = RectangleShape,
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 0.dp,
+            shadowElevation = 0.dp,
+        ) {
+            Column(
+                modifier = Modifier.padding(vertical = 8.dp),
+            ) {
+                Text(
+                    text = title,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
+                if (entries.isEmpty()) {
+                    Text(
+                        text = "No entries available.",
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 220.dp),
+                    ) {
+                        items(
+                            items = entries,
+                            key = { entry -> entry.index },
+                        ) { entry ->
+                            val selected = entry.index == currentIndex
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onSelect(entry.index) },
+                                shape = RectangleShape,
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                } else {
+                                    MaterialTheme.colorScheme.surface
+                                },
+                            ) {
+                                Text(
+                                    text = entry.label,
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (selected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                    maxLines = 1,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -2635,6 +2943,9 @@ private fun ReaderTopBar(
     subtitle: String,
     onBack: () -> Unit,
     onSettings: (() -> Unit)?,
+    onTableOfContents: (() -> Unit)? = null,
+    onBookmarkToggle: (() -> Unit)? = null,
+    isBookmarked: Boolean = false,
 ) {
     TopAppBar(
         colors = TopAppBarDefaults.topAppBarColors(
@@ -2661,6 +2972,23 @@ private fun ReaderTopBar(
             }
         },
         actions = {
+            onTableOfContents?.let { openToc ->
+                IconButton(onClick = openToc) {
+                    Icon(
+                        imageVector = Icons.Outlined.FormatListBulleted,
+                        contentDescription = "Table of contents",
+                    )
+                }
+            }
+            onBookmarkToggle?.let { toggleBookmark ->
+                IconButton(onClick = toggleBookmark) {
+                    Icon(
+                        imageVector = if (isBookmarked) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder,
+                        contentDescription = if (isBookmarked) "Remove bookmark" else "Add bookmark",
+                        tint = if (isBookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+            }
             onSettings?.let { openSettings ->
                 IconButton(onClick = openSettings) {
                     Icon(

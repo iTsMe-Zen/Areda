@@ -12,6 +12,7 @@ object ReaderStateStore {
     private const val KEY_LIBRARY_SORT_MODE = "library_sort_mode"
     private const val KEY_PINNED_LIBRARY_ITEMS = "pinned_library_items"
     private const val KEY_LIBRARY_ADDED_AT = "library_added_at"
+    private const val KEY_BOOKMARKS = "bookmarks"
 
     fun loadPreferences(context: Context): ReaderPreferences {
         val payload = context
@@ -79,6 +80,7 @@ object ReaderStateStore {
                             pdfPageIndex = item.optInt("pdfPageIndex").coerceAtLeast(0),
                             pdfPageCount = item.optInt("pdfPageCount").coerceAtLeast(0),
                             pdfZoomScale = item.optDouble("pdfZoomScale", 1.0).toFloat().coerceIn(1f, 5f),
+                            txtScrollFraction = item.optDouble("txtScrollFraction", 0.0).toFloat().coerceIn(0f, 1f),
                             updatedAt = item.optLong("updatedAt", 0L),
                         ),
                     )
@@ -105,6 +107,7 @@ object ReaderStateStore {
                         put("pdfPageIndex", progress.pdfPageIndex)
                         put("pdfPageCount", progress.pdfPageCount)
                         put("pdfZoomScale", progress.pdfZoomScale)
+                        put("txtScrollFraction", progress.txtScrollFraction)
                         put("updatedAt", progress.updatedAt)
                     },
                 )
@@ -253,6 +256,84 @@ object ReaderStateStore {
             .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_LIBRARY_ADDED_AT, payload.toString())
+            .apply()
+    }
+
+    fun loadBookmarks(context: Context): List<ReadingBookmark> {
+        val payload = context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_BOOKMARKS, null)
+            ?: return emptyList()
+
+        return runCatching {
+            buildList {
+                val items = JSONArray(payload)
+                repeat(items.length()) { index ->
+                    val item = items.optJSONObject(index) ?: return@repeat
+                    val id = item.optString("id")
+                    val uriString = item.optString("uri")
+                    val title = item.optString("title")
+                    val type = DocumentType.entries.firstOrNull { it.name == item.optString("type") }
+                        ?: return@repeat
+                    if (id.isBlank() || uriString.isBlank() || title.isBlank()) {
+                        return@repeat
+                    }
+
+                    add(
+                        ReadingBookmark(
+                            id = id,
+                            uriString = uriString,
+                            title = title,
+                            type = type,
+                            positionLabel = item.optString("positionLabel").ifBlank { type.name },
+                            epubChapterIndex = item.optInt("epubChapterIndex").coerceAtLeast(0),
+                            epubChapterCount = item.optInt("epubChapterCount").coerceAtLeast(0),
+                            epubChapterTitle = item.optString("epubChapterTitle"),
+                            epubScrollFraction = item.optDouble("epubScrollFraction", 0.0).toFloat().coerceIn(0f, 1f),
+                            pdfPageIndex = item.optInt("pdfPageIndex").coerceAtLeast(0),
+                            pdfPageCount = item.optInt("pdfPageCount").coerceAtLeast(0),
+                            txtScrollFraction = item.optDouble("txtScrollFraction", 0.0).toFloat().coerceIn(0f, 1f),
+                            createdAt = item.optLong("createdAt", 0L),
+                            updatedAt = item.optLong("updatedAt", 0L),
+                        ),
+                    )
+                }
+            }.sortedByDescending { it.updatedAt }
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveBookmarks(
+        context: Context,
+        bookmarks: List<ReadingBookmark>,
+    ) {
+        val payload = JSONArray()
+        bookmarks
+            .sortedByDescending { it.updatedAt }
+            .forEach { bookmark ->
+                payload.put(
+                    JSONObject().apply {
+                        put("id", bookmark.id)
+                        put("uri", bookmark.uriString)
+                        put("title", bookmark.title)
+                        put("type", bookmark.type.name)
+                        put("positionLabel", bookmark.positionLabel)
+                        put("epubChapterIndex", bookmark.epubChapterIndex)
+                        put("epubChapterCount", bookmark.epubChapterCount)
+                        put("epubChapterTitle", bookmark.epubChapterTitle)
+                        put("epubScrollFraction", bookmark.epubScrollFraction)
+                        put("pdfPageIndex", bookmark.pdfPageIndex)
+                        put("pdfPageCount", bookmark.pdfPageCount)
+                        put("txtScrollFraction", bookmark.txtScrollFraction)
+                        put("createdAt", bookmark.createdAt)
+                        put("updatedAt", bookmark.updatedAt)
+                    },
+                )
+            }
+
+        context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_BOOKMARKS, payload.toString())
             .apply()
     }
 }

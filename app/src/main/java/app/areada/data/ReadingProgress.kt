@@ -9,5 +9,6 @@ data class ReadingProgress(
     val pdfPageIndex: Int = 0,
     val pdfPageCount: Int = 0,
     val pdfZoomScale: Float = 1f,
+    val txtScrollFraction: Float = 0f,
     val updatedAt: Long = System.currentTimeMillis(),
 )

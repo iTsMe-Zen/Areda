@@ -23,3 +23,5 @@ keystore.properties
 # OS junk
 .DS_Store
 Thumbs.db
+app/release/
+app/debug/

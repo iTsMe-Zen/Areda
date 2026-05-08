@@ -1,0 +1,7 @@
+Added table of contents and bookmark support.
+
+- Added table of contents navigation for supported reader formats.
+- Added bookmark support for saving important reading positions.
+- Improved reader navigation flow.
+- Fixed Fastlane changelog length issue.
+- Still offline-first with no internet permission.

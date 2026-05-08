@@ -1,12 +1,9 @@
 Bug fix and reader polish release.
 
-- Added a compact "Go to" overlay from the reader footer.
-- EPUB footer now shows the current chapter number and can jump to a chapter.
-- PDF footer now shows the current page number and can jump to a page.
-- Blocked empty, invalid, and out-of-range jump input to avoid crashes.
-- Fixed launcher icon XML/resource build issue.
-- Improved EPUB opening performance.
-- Improved PDF opening by moving renderer loading off the UI thread.
-- Improved library/search indexing behavior.
-- Improved Pin/Unpin action text behavior.
-- Confirmed the app still has no internet permission.
+- Added Go to overlay for EPUB chapters and PDF pages.
+- Blocked invalid jump input to avoid crashes.
+- Fixed launcher icon resource build issue.
+- Improved EPUB/PDF opening performance.
+- Improved library search/indexing.
+- Fixed Pin/Unpin action text.
+- Still no internet permission.

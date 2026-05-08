@@ -20,9 +20,13 @@ import app.areada.data.LibrarySortMode
 import app.areada.data.ReaderPreferences
 import app.areada.data.ReaderDocument
 import app.areada.data.ReaderStateStore
+import app.areada.data.ReadingBookmark
 import app.areada.data.ReadingProgress
 import app.areada.data.RecentDocument
 import app.areada.data.RecentDocumentStore
+import app.areada.data.epubBookmarkId
+import app.areada.data.pdfBookmarkId
+import app.areada.data.txtBookmarkId
 import app.areada.reader.EpubBook
 import app.areada.reader.EpubEngine
 import kotlinx.coroutines.CancellationException
@@ -39,6 +43,7 @@ import java.util.Locale
 data class ReaderUiState(
     val isLoading: Boolean = false,
     val recents: List<RecentDocument> = emptyList(),
+    val bookmarks: List<ReadingBookmark> = emptyList(),
     val preferences: ReaderPreferences = ReaderPreferences(),
     val progressByUri: Map<String, ReadingProgress> = emptyMap(),
     val libraryRoots: List<LibraryRoot> = emptyList(),
@@ -77,6 +82,7 @@ sealed interface ReaderScreen {
     data class Text(
         val document: ReaderDocument,
         val initialText: String,
+        val initialScrollFraction: Float = 0f,
         val deleteOnDiscard: Boolean = false,
     ) : ReaderScreen
 }
@@ -110,6 +116,7 @@ class ReaderViewModel : ViewModel() {
                 .take(3)
             val preferences = ReaderStateStore.loadPreferences(appContext)
             val progressByUri = ReaderStateStore.loadProgress(appContext)
+            val bookmarks = ReaderStateStore.loadBookmarks(appContext)
             val libraryRoots = ReaderStateStore.loadLibraryRoots(appContext)
             val sortMode = ReaderStateStore.loadLibrarySortMode(appContext)
             val pinnedIds = ReaderStateStore.loadPinnedLibraryItemIds(appContext)
@@ -122,6 +129,7 @@ class ReaderViewModel : ViewModel() {
                 _uiState.update { state ->
                     state.copy(
                         recents = recents,
+                        bookmarks = bookmarks,
                         preferences = preferences,
                         progressByUri = progressByUri,
                         libraryRoots = emptyList(),
@@ -151,6 +159,7 @@ class ReaderViewModel : ViewModel() {
                 _uiState.update { state ->
                     state.copy(
                         recents = recents,
+                        bookmarks = bookmarks,
                         preferences = preferences,
                         progressByUri = progressByUri,
                         libraryRoots = libraryRoots,
@@ -179,6 +188,7 @@ class ReaderViewModel : ViewModel() {
                 _uiState.update { state ->
                     state.copy(
                         recents = recents,
+                        bookmarks = bookmarks,
                         preferences = preferences,
                         progressByUri = progressByUri,
                         libraryRoots = libraryRoots,
@@ -568,6 +578,7 @@ class ReaderViewModel : ViewModel() {
         uri: Uri,
         fromRecent: Boolean = false,
         preResolvedDocument: ReaderDocument? = null,
+        initialProgressOverride: ReadingProgress? = null,
     ) {
         val appContext = context.applicationContext
 
@@ -582,7 +593,7 @@ class ReaderViewModel : ViewModel() {
                 val document = preResolvedDocument ?: withContext(Dispatchers.IO) {
                     DocumentResolver.resolve(appContext, uri)
                 }
-                val savedProgress = _uiState.value.progressByUri[document.uriString]
+                val savedProgress = initialProgressOverride ?: _uiState.value.progressByUri[document.uriString]
 
                 val screen = when (document.type) {
                     DocumentType.EPUB -> {
@@ -613,6 +624,7 @@ class ReaderViewModel : ViewModel() {
                         initialText = withContext(Dispatchers.IO) {
                             LibraryRepository.readText(appContext, document.uri)
                         },
+                        initialScrollFraction = savedProgress?.txtScrollFraction?.coerceIn(0f, 1f) ?: 0f,
                     )
                 }
 
@@ -676,6 +688,106 @@ class ReaderViewModel : ViewModel() {
                 type = recent.type,
             ),
         )
+    }
+
+    fun openBookmark(
+        context: Context,
+        bookmark: ReadingBookmark,
+    ) {
+        val uri = Uri.parse(bookmark.uriString)
+        openDocument(
+            context = context,
+            uri = uri,
+            preResolvedDocument = ReaderDocument(
+                uri = uri,
+                uriString = bookmark.uriString,
+                title = bookmark.title,
+                type = bookmark.type,
+            ),
+            initialProgressOverride = bookmark.toProgress(),
+        )
+    }
+
+    fun toggleEpubBookmark(
+        context: Context,
+        document: ReaderDocument,
+        chapterIndex: Int,
+        chapterCount: Int,
+        scrollFraction: Float,
+        chapterTitle: String,
+    ) {
+        val safeIndex = chapterIndex.coerceAtLeast(0)
+        val safeCount = chapterCount.coerceAtLeast(0)
+        val safeScroll = scrollFraction.coerceIn(0f, 1f)
+        val id = epubBookmarkId(document.uriString, safeIndex, safeScroll)
+        toggleBookmark(context, id) { now ->
+            ReadingBookmark(
+                id = id,
+                uriString = document.uriString,
+                title = document.title,
+                type = document.type,
+                positionLabel = if (safeCount > 0) {
+                    "Chapter ${safeIndex + 1} of $safeCount"
+                } else {
+                    "Chapter ${safeIndex + 1}"
+                },
+                epubChapterIndex = safeIndex,
+                epubChapterCount = safeCount,
+                epubChapterTitle = chapterTitle,
+                epubScrollFraction = safeScroll,
+                createdAt = now,
+                updatedAt = now,
+            )
+        }
+    }
+
+    fun togglePdfBookmark(
+        context: Context,
+        document: ReaderDocument,
+        pageIndex: Int,
+        pageCount: Int,
+    ) {
+        val safeIndex = pageIndex.coerceAtLeast(0)
+        val safeCount = pageCount.coerceAtLeast(0)
+        val id = pdfBookmarkId(document.uriString, safeIndex)
+        toggleBookmark(context, id) { now ->
+            ReadingBookmark(
+                id = id,
+                uriString = document.uriString,
+                title = document.title,
+                type = document.type,
+                positionLabel = if (safeCount > 0) {
+                    "Page ${safeIndex + 1} of $safeCount"
+                } else {
+                    "Page ${safeIndex + 1}"
+                },
+                pdfPageIndex = safeIndex,
+                pdfPageCount = safeCount,
+                createdAt = now,
+                updatedAt = now,
+            )
+        }
+    }
+
+    fun toggleTextBookmark(
+        context: Context,
+        document: ReaderDocument,
+        scrollFraction: Float,
+    ) {
+        val safeScroll = scrollFraction.coerceIn(0f, 1f)
+        val id = txtBookmarkId(document.uriString, safeScroll)
+        toggleBookmark(context, id) { now ->
+            ReadingBookmark(
+                id = id,
+                uriString = document.uriString,
+                title = document.title,
+                type = document.type,
+                positionLabel = "TXT ${(safeScroll * 100f).toInt().coerceIn(0, 100)}%",
+                txtScrollFraction = safeScroll,
+                createdAt = now,
+                updatedAt = now,
+            )
+        }
     }
 
     fun removeRecent(
@@ -858,6 +970,7 @@ class ReaderViewModel : ViewModel() {
                         currentScreen = ReaderScreen.Text(
                             document = document,
                             initialText = "",
+                            initialScrollFraction = 0f,
                             deleteOnDiscard = true,
                         ),
                         errorMessage = null,
@@ -986,14 +1099,17 @@ class ReaderViewModel : ViewModel() {
 
                 val updatedRecents = _uiState.value.recents.filterNot { it.uriString == book.uriString }
                 val updatedProgress = _uiState.value.progressByUri - book.uriString
+                val updatedBookmarks = _uiState.value.bookmarks.filterNot { it.uriString == book.uriString }
                 withContext(Dispatchers.IO) {
                     RecentDocumentStore.save(appContext, updatedRecents)
                     ReaderStateStore.saveProgress(appContext, updatedProgress)
+                    ReaderStateStore.saveBookmarks(appContext, updatedBookmarks)
                 }
                 _uiState.update {
                     it.copy(
                         recents = updatedRecents,
                         progressByUri = updatedProgress,
+                        bookmarks = updatedBookmarks,
                     )
                 }
                 reloadCurrentLibraryFolder(appContext)
@@ -1114,6 +1230,22 @@ class ReaderViewModel : ViewModel() {
         )
     }
 
+    fun saveTextProgress(
+        context: Context,
+        document: ReaderDocument,
+        scrollFraction: Float,
+    ) {
+        saveProgress(
+            context = context,
+            progress = ReadingProgress(
+                uriString = document.uriString,
+                type = document.type,
+                txtScrollFraction = scrollFraction.coerceIn(0f, 1f),
+                updatedAt = System.currentTimeMillis(),
+            ),
+        )
+    }
+
     fun saveTextDocument(
         context: Context,
         document: ReaderDocument,
@@ -1156,14 +1288,17 @@ class ReaderViewModel : ViewModel() {
                 }
                 val updatedRecents = _uiState.value.recents.filterNot { it.uriString == document.uriString }
                 val updatedProgress = _uiState.value.progressByUri - document.uriString
+                val updatedBookmarks = _uiState.value.bookmarks.filterNot { it.uriString == document.uriString }
                 withContext(Dispatchers.IO) {
                     RecentDocumentStore.save(appContext, updatedRecents)
                     ReaderStateStore.saveProgress(appContext, updatedProgress)
+                    ReaderStateStore.saveBookmarks(appContext, updatedBookmarks)
                 }
                 _uiState.update { state ->
                     state.copy(
                         recents = updatedRecents,
                         progressByUri = updatedProgress,
+                        bookmarks = updatedBookmarks,
                         currentScreen = ReaderScreen.Home,
                     )
                 }
@@ -1210,6 +1345,13 @@ class ReaderViewModel : ViewModel() {
                     LibraryRepository.saveText(appContext, renamedDocument.uri, currentText)
                 }
                 val currentScreen = _uiState.value.currentScreen
+                val updatedBookmarks = _uiState.value.bookmarks.map { bookmark ->
+                    if (bookmark.uriString == document.uriString) {
+                        bookmark.withDocument(renamedDocument)
+                    } else {
+                        bookmark
+                    }
+                }
                 val updatedRecents = _uiState.value.recents.map { recent ->
                     if (recent.uriString == document.uriString) {
                         recent.copy(
@@ -1222,10 +1364,12 @@ class ReaderViewModel : ViewModel() {
                 }
                 withContext(Dispatchers.IO) {
                     RecentDocumentStore.save(appContext, updatedRecents)
+                    ReaderStateStore.saveBookmarks(appContext, updatedBookmarks)
                 }
                 _uiState.update { state ->
                     state.copy(
                         recents = updatedRecents,
+                        bookmarks = updatedBookmarks,
                         currentScreen = if (
                             currentScreen is ReaderScreen.Text &&
                             currentScreen.document.uriString == document.uriString
@@ -1396,6 +1540,55 @@ class ReaderViewModel : ViewModel() {
         }.take(3)
     }
 
+    private fun toggleBookmark(
+        context: Context,
+        id: String,
+        createBookmark: (Long) -> ReadingBookmark,
+    ) {
+        val appContext = context.applicationContext
+        val currentBookmarks = _uiState.value.bookmarks
+        val existing = currentBookmarks.firstOrNull { it.id == id }
+        val updatedBookmarks = if (existing == null) {
+            val now = System.currentTimeMillis()
+            listOf(createBookmark(now)) + currentBookmarks
+        } else {
+            currentBookmarks.filterNot { it.id == id }
+        }.sortedByDescending { it.updatedAt }
+
+        _uiState.update { state ->
+            state.copy(bookmarks = updatedBookmarks)
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            ReaderStateStore.saveBookmarks(appContext, updatedBookmarks)
+        }
+    }
+
+    private fun ReadingBookmark.toProgress(): ReadingProgress =
+        ReadingProgress(
+            uriString = uriString,
+            type = type,
+            epubChapterIndex = epubChapterIndex,
+            epubChapterCount = epubChapterCount,
+            epubScrollFraction = epubScrollFraction,
+            pdfPageIndex = pdfPageIndex,
+            pdfPageCount = pdfPageCount,
+            txtScrollFraction = txtScrollFraction,
+            updatedAt = updatedAt,
+        )
+
+    private fun ReadingBookmark.withDocument(document: ReaderDocument): ReadingBookmark {
+        val newId = when (type) {
+            DocumentType.EPUB -> epubBookmarkId(document.uriString, epubChapterIndex, epubScrollFraction)
+            DocumentType.PDF -> pdfBookmarkId(document.uriString, pdfPageIndex)
+            DocumentType.TXT -> txtBookmarkId(document.uriString, txtScrollFraction)
+        }
+        return copy(
+            id = newId,
+            uriString = document.uriString,
+            title = document.title,
+            updatedAt = System.currentTimeMillis(),
+        )
+    }
     private fun saveProgress(
         context: Context,
         progress: ReadingProgress,
