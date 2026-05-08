@@ -1,0 +1,6 @@
+Source build cleanup.
+
+- Removed local Windows Java path from Gradle config.
+- Improved F-Droid build compatibility.
+- No app behavior changes.
+- Still offline-first with no internet permission.
