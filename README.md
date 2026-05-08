@@ -1,5 +1,5 @@
 <h1>
-  <img src="assets/logo/logo.png" alt="Areada logo" width="38" height="38" align="center" />
+  <img src="assets/logo.png" alt="Areada logo" width="38" height="38" align="center" />
   Areada
 </h1>
 
