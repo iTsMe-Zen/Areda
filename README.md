@@ -55,20 +55,31 @@ The app does not collect, upload, sell, or share user data. Files opened in the 
 ## Screenshots
 
 <p align="center">
-  <img src="screenshots/1.jpg" alt="Library screen" width="175" />
-  <img src="screenshots/2.jpg" alt="Swipe actions screen" width="175" />
-  <img src="screenshots/3.jpg" alt="Settings screen" width="175" />
-  <img src="screenshots/4.jpg" alt="Notes screen" width="175" />
+  <img src="screenshots/1.jpg" alt="Library screen" width="260" />
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="screenshots/2.jpg" alt="Swipe actions screen" width="260" />
 </p>
 
 <p align="center">
   <sub>
     <b>Library</b>
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;•&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
     <b>Swipe Actions</b>
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;•&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  </sub>
+</p>
+
+<br />
+
+<p align="center">
+  <img src="screenshots/3.jpg" alt="Settings screen" width="260" />
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="screenshots/4.jpg" alt="Notes screen" width="260" />
+</p>
+
+<p align="center">
+  <sub>
     <b>Settings</b>
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;•&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
     <b>Notes</b>
   </sub>
 </p>
