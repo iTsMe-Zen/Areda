@@ -67,7 +67,6 @@ import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -388,6 +387,7 @@ private fun HomeScreen(
             onPreferencesChange = onPreferencesChange,
         )
     }
+
     if (showManageFolders) {
         ManageFoldersSheet(
             roots = roots,
@@ -397,7 +397,21 @@ private fun HomeScreen(
         )
     }
 
-    actionTarget?.let { target ->
+    val currentActionTarget = actionTarget?.let { target ->
+        when (target) {
+            is LibraryActionTarget.Folder -> folders
+                .firstOrNull { folder -> folder.id == target.folder.id }
+                ?.let { folder -> LibraryActionTarget.Folder(folder) }
+                ?: target
+
+            is LibraryActionTarget.Book -> books
+                .firstOrNull { book -> book.id == target.book.id }
+                ?.let { book -> LibraryActionTarget.Book(book) }
+                ?: target
+        }
+    }
+
+    currentActionTarget?.let { target ->
         LibraryActionSheet(
             target = target,
             onDismiss = { actionTarget = null },
@@ -878,6 +892,89 @@ private fun ConfirmDeleteDialog(
         onDismiss = onDismiss,
         onYes = onConfirm,
     )
+}
+
+@Composable
+private fun GoToPositionDialog(
+    label: String,
+    currentIndex: Int,
+    total: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (Int) -> Unit,
+) {
+    val safeTotal = total.coerceAtLeast(1)
+    var input by rememberSaveable(label, currentIndex, safeTotal) {
+        mutableStateOf((currentIndex + 1).coerceIn(1, safeTotal).toString())
+    }
+    val targetNumber = input.trim().toIntOrNull()
+    val targetIsValid = targetNumber != null && targetNumber in 1..safeTotal
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RectangleShape,
+            color = MaterialTheme.colorScheme.background,
+            tonalElevation = 0.dp,
+            shadowElevation = 0.dp,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 16.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Go to:",
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                    Text(
+                        text = "$label ${currentIndex + 1} / $safeTotal",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { value ->
+                        input = value.filter { it.isDigit() }.take(6)
+                    },
+                    singleLine = true,
+                    isError = input.isNotBlank() && !targetIsValid,
+                    placeholder = {
+                        Text(text = "1-$safeTotal")
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    PromptChoiceButton(
+                        label = "OK",
+                        highlighted = true,
+                        enabled = targetIsValid,
+                        onClick = {
+                            val selectedNumber = targetNumber ?: return@PromptChoiceButton
+                            onConfirm((selectedNumber - 1).coerceIn(0, safeTotal - 1))
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                    PromptChoiceButton(
+                        label = "Cancel",
+                        highlighted = false,
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -1377,17 +1474,41 @@ private fun LibraryActionSheet(
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(12.dp))
-            TextButton(onClick = onTogglePin) {
-                Text(text = if (target.pinned) "Unpin from top" else "Pin to top")
-            }
-            TextButton(onClick = onRename) {
-                Text(text = "Rename")
-            }
-            TextButton(onClick = onDelete) {
-                Text(text = "Delete")
-            }
+            ActionSheetItem(
+                label = if (target.pinned) "Unpin" else "Pin",
+                onClick = onTogglePin,
+            )
+            ActionSheetItem(
+                label = "Rename",
+                onClick = onRename,
+            )
+            ActionSheetItem(
+                label = "Delete",
+                onClick = onDelete,
+            )
             Spacer(modifier = Modifier.height(12.dp))
         }
+    }
+}
+
+@Composable
+private fun ActionSheetItem(
+    label: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = MaterialTheme.colorScheme.primary,
+            style = MaterialTheme.typography.bodyLarge,
+            textAlign = TextAlign.Start,
+        )
     }
 }
 
@@ -1466,6 +1587,9 @@ private fun EpubReaderScreen(
     var noteText by rememberSaveable(screen.document.uriString) {
         mutableStateOf<String?>(null)
     }
+    var showGoToChapter by rememberSaveable(screen.document.uriString) {
+        mutableStateOf(false)
+    }
     var chapterIndex by rememberSaveable(screen.document.uriString, screen.initialChapterIndex) {
         mutableIntStateOf(screen.initialChapterIndex)
     }
@@ -1519,6 +1643,7 @@ private fun EpubReaderScreen(
             onPreferencesChange = onPreferencesChange,
         )
     }
+
     KeepReaderScreenAwake(enabled = preferences.keepScreenOn)
     LaunchedEffect(isFullMode) {
         fullControlsVisible = false
@@ -1558,6 +1683,19 @@ private fun EpubReaderScreen(
         }
         switchToChapter(nextIndex)
         return true
+    }
+
+    if (showGoToChapter) {
+        GoToPositionDialog(
+            label = "Chapter",
+            currentIndex = chapterIndex,
+            total = screen.book.chapters.size,
+            onDismiss = { showGoToChapter = false },
+            onConfirm = { nextIndex ->
+                switchToChapter(nextIndex)
+                showGoToChapter = false
+            },
+        )
     }
 
     Scaffold(
@@ -1629,10 +1767,11 @@ private fun EpubReaderScreen(
                     ReaderFooter(
                         leftLabel = "Prev",
                         rightLabel = "Next",
-                        centerLabel = renderedChapter?.title ?: "Loading",
+                        centerLabel = "Ch ${chapterIndex + 1}",
                         leftEnabled = chapterIndex > 0,
                         rightEnabled = chapterIndex < screen.book.chapters.lastIndex,
                         onLeft = ::goToPreviousChapter,
+                        onCenter = { showGoToChapter = true },
                         onRight = ::goToNextChapter,
                     )
                 }
@@ -1660,15 +1799,31 @@ private fun PdfReaderScreen(
     onSaveProgress: (pageIndex: Int, pageCount: Int, zoomScale: Float) -> Unit,
 ) {
     val context = LocalContext.current.applicationContext
-    val rendererResult = remember(screen.document.uriString) {
-        runCatching { PdfPageRenderer(context, screen.document.uri) }
+    var rendererResult by remember(screen.document.uriString) {
+        mutableStateOf<Result<PdfPageRenderer>?>(null)
     }
-    val renderer = rendererResult.getOrNull()
+    LaunchedEffect(screen.document.uriString) {
+        rendererResult = null
+        rendererResult = withContext(Dispatchers.IO) {
+            runCatching { PdfPageRenderer(context, screen.document.uri) }
+        }
+    }
+    val renderer = rendererResult?.getOrNull()
 
     DisposableEffect(renderer) {
         onDispose {
             renderer?.close()
         }
+    }
+
+    if (rendererResult == null) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            LoadingState(label = "Opening PDF")
+        }
+        return
     }
 
     if (renderer == null) {
@@ -1689,7 +1844,7 @@ private fun PdfReaderScreen(
                     .padding(paddingValues),
             ) {
                 ReaderMessage(
-                    message = rendererResult.exceptionOrNull()?.let { displayError(it, "Unable to open that PDF.") }
+                    message = rendererResult?.exceptionOrNull()?.let { displayError(it, "Unable to open that PDF.") }
                         ?: "Unable to open that PDF.",
                 )
             }
@@ -1705,6 +1860,9 @@ private fun PdfReaderScreen(
         mutableStateOf(true)
     }
     var fullControlsVisible by rememberSaveable(screen.document.uriString) {
+        mutableStateOf(false)
+    }
+    var showGoToPage by rememberSaveable(screen.document.uriString) {
         mutableStateOf(false)
     }
     var pageIndex by rememberSaveable(screen.document.uriString, screen.initialPageIndex) {
@@ -1726,6 +1884,19 @@ private fun PdfReaderScreen(
             showPdfNote = true,
             onDismiss = { showSettings = false },
             onPreferencesChange = onPreferencesChange,
+        )
+    }
+    if (showGoToPage) {
+        GoToPositionDialog(
+            label = "Page",
+            currentIndex = pageIndex,
+            total = pageCount,
+            onDismiss = { showGoToPage = false },
+            onConfirm = { nextIndex ->
+                onSaveProgress(pageIndex, pageCount, zoomScale)
+                pageIndex = nextIndex
+                showGoToPage = false
+            },
         )
     }
     KeepReaderScreenAwake(enabled = preferences.keepScreenOn)
@@ -1826,10 +1997,11 @@ private fun PdfReaderScreen(
                     ReaderFooter(
                         leftLabel = "Prev",
                         rightLabel = "Next",
-                        centerLabel = "${zoomScale.roundToInt()}x zoom",
+                        centerLabel = "Page ${pageIndex + 1}",
                         leftEnabled = pageIndex > 0,
                         rightEnabled = pageIndex < pageCount - 1,
                         onLeft = ::goToPreviousPage,
+                        onCenter = { showGoToPage = true },
                         onRight = ::goToNextPage,
                     )
                 }
@@ -1901,6 +2073,7 @@ private fun TextReaderScreen(
             onPreferencesChange = onPreferencesChange,
         )
     }
+
     if (showRename) {
         RenameDialog(
             name = renameText,
@@ -2508,6 +2681,7 @@ private fun ReaderFooter(
     leftEnabled: Boolean,
     rightEnabled: Boolean,
     onLeft: () -> Unit,
+    onCenter: (() -> Unit)? = null,
     onRight: () -> Unit,
 ) {
     Surface(
@@ -2525,18 +2699,42 @@ private fun ReaderFooter(
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                TextButton(onClick = onLeft, enabled = leftEnabled) {
-                    Text(text = leftLabel)
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    TextButton(onClick = onLeft, enabled = leftEnabled) {
+                        Text(text = leftLabel)
+                    }
                 }
-                Text(
-                    text = centerLabel,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = onRight, enabled = rightEnabled) {
-                    Text(text = rightLabel)
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (onCenter == null) {
+                        Text(
+                            text = centerLabel,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        TextButton(onClick = onCenter) {
+                            Text(
+                                text = centerLabel,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.CenterEnd,
+                ) {
+                    TextButton(onClick = onRight, enabled = rightEnabled) {
+                        Text(text = rightLabel)
+                    }
                 }
             }
         }

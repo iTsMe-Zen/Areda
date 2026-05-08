@@ -17,19 +17,23 @@ import org.w3c.dom.Document
 import org.w3c.dom.Element
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
+import java.net.URI
 import java.util.Locale
-import java.util.zip.ZipInputStream
+import java.util.zip.ZipFile
 import javax.xml.parsers.DocumentBuilderFactory
 
 data class EpubBook(
     val title: String,
     val extractedRoot: File,
     val chapters: List<EpubChapter>,
+    val archiveFile: File? = null,
 )
 
 data class EpubChapter(
     val title: String,
     val file: File,
+    val archivePath: String = "",
 )
 
 data class RenderedChapter(
@@ -60,57 +64,49 @@ object EpubEngine {
             "areada/epub/${uri.toString().hashCode().toUInt().toString(16)}",
         )
         return try {
-            val readyMarker = File(root, ".areada_epub_ready")
-            val containerFile = resolveInside(root, "META-INF/container.xml")
-            if ((!readyMarker.exists() || !containerFile.isFile) && root.exists()) {
+            val readyMarker = File(root, ".areada_epub_ready_v2")
+            val archiveFile = File(root, "book.epub")
+            if ((!readyMarker.exists() || !archiveFile.isFile) && root.exists()) {
                 root.deleteRecursively()
             }
-            if (!readyMarker.exists()) {
+            if (!archiveFile.isFile) {
                 root.mkdirs()
+                copyArchive(context, uri, archiveFile)
+            }
 
-                context.contentResolver.openInputStream(uri)?.use { input ->
-                    extractArchive(root, input)
-                } ?: throw IllegalArgumentException("Unable to read that EPUB.")
+            ZipFile(archiveFile).use { zip ->
+                val containerDocument = readZipXml(zip, "META-INF/container.xml")
+                val rootFile = containerDocument
+                    .getElementsByTagNameNS("*", "rootfile")
+                    .item(0) as? Element
+                    ?: throw IllegalArgumentException("Invalid or unsupported EPUB file.")
 
-                if (!containerFile.isFile) {
-                    throw IllegalArgumentException("Invalid or unsupported EPUB file.")
-                }
+                val packagePath = rootFile.getAttribute("full-path")
+                    .replace('\\', '/')
+                    .trimStart('/')
+                val packageDocument = readZipXml(zip, packagePath)
+
+                val manifest = buildManifest(packageDocument)
+                val packageDirectory = packagePath.substringBeforeLast('/', "")
+                val chapters = buildChapters(root, zip, packageDocument, manifest, packageDirectory)
+                require(chapters.isNotEmpty()) { "This EPUB does not contain readable chapters." }
+
+                val title = packageDocument
+                    .getElementsByTagNameNS("*", "title")
+                    .item(0)
+                    ?.textContent
+                    ?.trim()
+                    ?.ifBlank { null }
+                    ?: fallbackTitle
+
                 readyMarker.writeText("ready")
+                EpubBook(
+                    title = title,
+                    extractedRoot = root,
+                    chapters = chapters,
+                    archiveFile = archiveFile,
+                )
             }
-
-            val containerDocument = parseXml(containerFile)
-            val rootFile = containerDocument
-                .getElementsByTagNameNS("*", "rootfile")
-                .item(0) as? Element
-                ?: throw IllegalArgumentException("Invalid or unsupported EPUB file.")
-
-            val packagePath = rootFile.getAttribute("full-path")
-                .replace('\\', '/')
-                .trimStart('/')
-            val packageFile = resolveInside(root, packagePath)
-            if (!packageFile.isFile) {
-                throw IllegalArgumentException("Invalid or unsupported EPUB file.")
-            }
-            val packageDocument = parseXml(packageFile)
-
-            val manifest = buildManifest(packageDocument)
-            val packageDirectory = packagePath.substringBeforeLast('/', "")
-            val chapters = buildChapters(root, packageDocument, manifest, packageDirectory)
-            require(chapters.isNotEmpty()) { "This EPUB does not contain readable chapters." }
-
-            val title = packageDocument
-                .getElementsByTagNameNS("*", "title")
-                .item(0)
-                ?.textContent
-                ?.trim()
-                ?.ifBlank { null }
-                ?: fallbackTitle
-
-            EpubBook(
-                title = title,
-                extractedRoot = root,
-                chapters = chapters,
-            )
         } catch (throwable: Throwable) {
             root.deleteRecursively()
             throw IllegalArgumentException(cleanEpubError(throwable), throwable)
@@ -124,6 +120,7 @@ object EpubEngine {
         paletteOverride: ReaderRenderPalette?,
     ): RenderedChapter {
         val chapter = book.chapters.getOrNull(chapterIndex) ?: error("Chapter not found.")
+        ensureChapterExtracted(book, chapter)
         val rawHtml = chapter.file.readText()
         val baseUrl = chapter.file.parentFile?.toURI()?.toString().orEmpty()
         val palette = paletteOverride ?: preferences.themeMode.renderPalette()
@@ -131,6 +128,7 @@ object EpubEngine {
         val lineSpacing = preferences.lineSpacing.coerceIn(1.2f, 2.4f)
         val colorScheme = if (preferences.themeMode == ReaderThemeMode.DARK) "dark" else "light"
         val normalizedDocument = Jsoup.parse(rawHtml, baseUrl, Parser.htmlParser())
+        ensureReferencedAssets(book, chapter, normalizedDocument)
         val renderedDocument = buildRenderedDocument(
             sourceDocument = normalizedDocument,
             baseUrl = baseUrl,
@@ -311,6 +309,7 @@ object EpubEngine {
 
     private fun buildChapters(
         root: File,
+        zip: ZipFile,
         document: Document,
         manifest: Map<String, ManifestItem>,
         packageDirectory: String,
@@ -327,52 +326,169 @@ object EpubEngine {
                 }
 
                 val archivePath = normalizeArchivePath(packageDirectory, manifestItem.href)
-                val chapterFile = resolveInside(root, archivePath)
-                if (!chapterFile.exists()) {
+                if (zip.getEntry(archivePath) == null) {
                     return@repeat
                 }
 
                 add(
                     EpubChapter(
                         title = prettyChapterTitle(manifestItem.href, index),
-                        file = chapterFile,
+                        file = resolveInside(root, archivePath),
+                        archivePath = archivePath,
                     ),
                 )
             }
         }
     }
 
-    private fun extractArchive(root: File, inputStream: java.io.InputStream) {
-        ZipInputStream(inputStream).use { zip ->
-            while (true) {
-                val entry = zip.nextEntry ?: break
-                val archivePath = normalizeArchivePath("", entry.name)
-                if (archivePath.isBlank()) {
-                    zip.closeEntry()
-                    continue
-                }
+    private fun copyArchive(context: Context, uri: Uri, archiveFile: File) {
+        archiveFile.parentFile?.mkdirs()
+        val tempFile = File(archiveFile.parentFile, "${archiveFile.name}.tmp")
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            FileOutputStream(tempFile).use { output ->
+                input.copyTo(output, DEFAULT_BUFFER_SIZE * 4)
+            }
+        } ?: throw IllegalArgumentException("Unable to read that EPUB.")
 
-                val target = resolveInside(root, archivePath)
-                if (entry.isDirectory) {
-                    target.mkdirs()
-                } else {
-                    target.parentFile?.mkdirs()
-                    FileOutputStream(target).use { output ->
-                        zip.copyTo(output)
-                    }
+        if (archiveFile.exists()) {
+            archiveFile.delete()
+        }
+        if (!tempFile.renameTo(archiveFile)) {
+            tempFile.copyTo(archiveFile, overwrite = true)
+            tempFile.delete()
+        }
+    }
+
+    private fun readZipXml(zip: ZipFile, archivePath: String): Document {
+        val normalizedPath = normalizeArchivePath("", archivePath)
+        val entry = zip.getEntry(normalizedPath)
+            ?: throw IllegalArgumentException("Invalid or unsupported EPUB file.")
+        return zip.getInputStream(entry).use { input ->
+            parseXml(input)
+        }
+    }
+
+    private fun ensureChapterExtracted(book: EpubBook, chapter: EpubChapter) {
+        if (chapter.file.isFile) {
+            return
+        }
+        val archiveFile = book.archiveFile ?: return
+        val archivePath = chapter.archivePath.ifBlank {
+            chapter.file.relativeToOrNull(book.extractedRoot)?.invariantSeparatorsPath.orEmpty()
+        }
+        if (archivePath.isBlank()) {
+            return
+        }
+
+        ZipFile(archiveFile).use { zip ->
+            extractEntry(zip, book.extractedRoot, archivePath)
+                ?: throw IllegalArgumentException("Invalid or unsupported EPUB file.")
+        }
+    }
+
+    private fun ensureReferencedAssets(
+        book: EpubBook,
+        chapter: EpubChapter,
+        document: JsoupHtmlDocument,
+    ) {
+        val archiveFile = book.archiveFile ?: return
+        val chapterDirectory = chapter.archivePath.substringBeforeLast('/', "")
+        val archivePaths = linkedSetOf<String>()
+
+        document.select("[src], [href], [poster]").forEach { element ->
+            archiveReferenceFrom(chapterDirectory, element.attr("src"))?.let { archivePaths += it }
+            archiveReferenceFrom(chapterDirectory, element.attr("href"))?.let { archivePaths += it }
+            archiveReferenceFrom(chapterDirectory, element.attr("poster"))?.let { archivePaths += it }
+        }
+        document.select("[srcset]").forEach { element ->
+            element.attr("srcset")
+                .split(',')
+                .map { candidate -> candidate.trim().substringBefore(' ').trim() }
+                .forEach { candidate ->
+                    archiveReferenceFrom(chapterDirectory, candidate)?.let { archivePaths += it }
                 }
-                zip.closeEntry()
+        }
+
+        if (archivePaths.isEmpty()) {
+            return
+        }
+
+        ZipFile(archiveFile).use { zip ->
+            archivePaths.forEach { archivePath ->
+                extractEntry(zip, book.extractedRoot, archivePath)
             }
         }
     }
 
-    private fun parseXml(file: File): Document {
+    private fun extractEntry(zip: ZipFile, root: File, archivePath: String): File? {
+        val normalizedPath = normalizeArchivePath("", archivePath)
+        if (normalizedPath.isBlank()) {
+            return null
+        }
+        val target = resolveInside(root, normalizedPath)
+        if (target.isFile || target.isDirectory) {
+            return target
+        }
+
+        val entry = zip.getEntry(normalizedPath) ?: return null
+        if (entry.isDirectory) {
+            target.mkdirs()
+            return target
+        }
+
+        target.parentFile?.mkdirs()
+        val tempFile = File(target.parentFile, "${target.name}.tmp")
+        zip.getInputStream(entry).use { input ->
+            FileOutputStream(tempFile).use { output ->
+                input.copyTo(output, DEFAULT_BUFFER_SIZE * 4)
+            }
+        }
+        if (target.exists()) {
+            target.delete()
+        }
+        if (!tempFile.renameTo(target)) {
+            tempFile.copyTo(target, overwrite = true)
+            tempFile.delete()
+        }
+        return target
+    }
+
+    private fun archiveReferenceFrom(basePath: String, rawReference: String): String? {
+        val reference = rawReference
+            .trim()
+            .substringBefore('#')
+            .substringBefore('?')
+            .trim()
+        if (reference.isBlank() || isExternalReference(reference)) {
+            return null
+        }
+
+        return normalizeArchivePath(basePath, decodeArchivePath(reference))
+            .takeIf { it.isNotBlank() }
+    }
+
+    private fun decodeArchivePath(reference: String): String =
+        runCatching { URI(reference).path ?: reference }.getOrDefault(reference)
+
+    private fun isExternalReference(reference: String): Boolean {
+        val lower = reference.lowercase(Locale.ROOT)
+        return lower.startsWith("//") ||
+            lower.startsWith("data:") ||
+            lower.startsWith("http:") ||
+            lower.startsWith("https:") ||
+            lower.startsWith("mailto:") ||
+            lower.startsWith("tel:") ||
+            lower.startsWith("javascript:") ||
+            lower.startsWith("file:") ||
+            lower.startsWith("android.resource:")
+    }    private fun parseXml(file: File): Document =
+        file.inputStream().use { input -> parseXml(input) }
+
+    private fun parseXml(inputStream: InputStream): Document {
         val factory = DocumentBuilderFactory.newInstance().apply {
             isNamespaceAware = true
         }
-        return file.inputStream().use { input ->
-            factory.newDocumentBuilder().parse(input)
-        }
+        return factory.newDocumentBuilder().parse(inputStream)
     }
 
     private fun resolveInside(root: File, archivePath: String): File {

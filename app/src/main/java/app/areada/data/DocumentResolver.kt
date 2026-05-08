@@ -9,7 +9,8 @@ object DocumentResolver {
     fun resolve(context: Context, uri: Uri): ReaderDocument {
         val contentResolver = context.contentResolver
         val displayName = queryDisplayName(contentResolver, uri) ?: uri.lastPathSegment ?: "Untitled"
-        val documentType = detectSupportedType(contentResolver.getType(uri), displayName)
+        val documentType = detectSupportedType(null, displayName)
+            ?: detectSupportedType(contentResolver.getType(uri), displayName)
             ?: error("Only EPUB, PDF, and TXT files are supported.")
         val title = displayName.substringBeforeLast('.', displayName).ifBlank { displayName }
 

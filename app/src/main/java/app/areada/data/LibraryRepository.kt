@@ -35,7 +35,7 @@ object LibraryRepository {
         val rootFolder = DocumentFile.fromTreeUri(context, rootUri)
             ?: error("Unable to access the selected folder.")
         val currentFolder = resolveFolder(rootFolder, relativePath)
-        val entries = runCatching { currentFolder.listFiles().toList() }
+        val entries = runCatching { currentFolder.listFiles() }
             .getOrElse { throw IllegalArgumentException("Unable to open that folder.") }
 
         val folders = entries
@@ -70,7 +70,7 @@ object LibraryRepository {
                         return@runCatching null
                     }
 
-                    val type = DocumentResolver.detectSupportedType(file.type, name) ?: return@runCatching null
+                    val type = supportedTypeFromName(name) ?: return@runCatching null
                     LibraryBookEntry(
                         id = file.uri.toString(),
                         uriString = file.uri.toString(),
@@ -317,12 +317,15 @@ object LibraryRepository {
                     continue
                 }
 
-                val children = runCatching { work.folder.listFiles().toList() }.getOrDefault(emptyList())
+                val children = runCatching { work.folder.listFiles() }.getOrDefault(emptyArray<DocumentFile>())
                 for (child in children) {
                     if (index.size >= MAX_SEARCH_INDEX_ITEMS || visited >= MAX_SEARCH_VISITED) {
                         break
                     }
                     visited++
+                    if (visited % 128 == 0) {
+                        Thread.yield()
+                    }
 
                     val name = runCatching { child.name?.trim().orEmpty() }.getOrDefault("")
                     if (name.isBlank()) {
@@ -493,7 +496,7 @@ object LibraryRepository {
             return
         }
 
-        val children = runCatching { folder.listFiles().toList() }.getOrDefault(emptyList())
+        val children = runCatching { folder.listFiles() }.getOrDefault(emptyArray<DocumentFile>())
         children.forEach { child ->
             if (results.size >= MAX_SEARCH_RESULTS || visitedProvider() >= MAX_SEARCH_VISITED) {
                 return
@@ -535,7 +538,7 @@ object LibraryRepository {
                 return@forEach
             }
 
-            val documentType = DocumentResolver.detectSupportedType(child.type, name) ?: return@forEach
+            val documentType = supportedTypeFromName(name) ?: return@forEach
             if (!lowerName.contains(query)) {
                 return@forEach
             }
@@ -619,7 +622,7 @@ object LibraryRepository {
             return null
         }
 
-        val children = runCatching { folder.listFiles().toList() }.getOrDefault(emptyList())
+        val children = runCatching { folder.listFiles() }.getOrDefault(emptyArray<DocumentFile>())
         children.forEach { child ->
             val found = runCatching {
                 when {

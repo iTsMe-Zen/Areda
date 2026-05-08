@@ -95,6 +95,7 @@ class ReaderViewModel : ViewModel() {
     private var searchIndexSignature: String = ""
     private var requestedSearchIndexSignature: String = ""
     private var searchIndexGeneration: Int = 0
+    private var libraryAddedAtCache: Map<String, Long> = emptyMap()
 
     fun initialize(context: Context) {
         if (initialized) {
@@ -113,6 +114,7 @@ class ReaderViewModel : ViewModel() {
             val sortMode = ReaderStateStore.loadLibrarySortMode(appContext)
             val pinnedIds = ReaderStateStore.loadPinnedLibraryItemIds(appContext)
             val addedAtById = ReaderStateStore.loadLibraryAddedAt(appContext)
+            libraryAddedAtCache = addedAtById
             val pickerEntries = rootPickerEntries(libraryRoots)
 
             if (libraryRoots.isEmpty()) {
@@ -165,10 +167,14 @@ class ReaderViewModel : ViewModel() {
                         currentBooks = folderState.books,
                         librarySortMode = sortMode,
                         pinnedLibraryItemIds = pinnedIds,
-                        libraryAddedAtById = ReaderStateStore.loadLibraryAddedAt(appContext),
+                        libraryAddedAtById = libraryAddedAtCache,
                     )
                 }
-                rebuildSearchIndex(appContext, libraryRoots)
+                rebuildSearchIndex(
+                    context = appContext,
+                    roots = libraryRoots,
+                    delayMillis = 250L,
+                )
             }.onFailure {
                 _uiState.update { state ->
                     state.copy(
@@ -184,7 +190,11 @@ class ReaderViewModel : ViewModel() {
                         errorMessage = "One of the saved folders is no longer available.",
                     )
                 }
-                rebuildSearchIndex(appContext, libraryRoots)
+                rebuildSearchIndex(
+                    context = appContext,
+                    roots = libraryRoots,
+                    delayMillis = 250L,
+                )
             }
         }
     }
@@ -242,11 +252,11 @@ class ReaderViewModel : ViewModel() {
                         currentPathSegments = folderState.pathSegments,
                         currentFolders = folderState.folders,
                         currentBooks = folderState.books,
-                        libraryAddedAtById = ReaderStateStore.loadLibraryAddedAt(appContext),
+                        libraryAddedAtById = libraryAddedAtCache,
                         errorMessage = null,
                     )
                 }
-                rebuildSearchIndex(appContext, updatedRoots)
+                markSearchIndexDirty(appContext, updatedRoots)
             } catch (throwable: Throwable) {
                 if (throwable is CancellationException) {
                     return@launch
@@ -325,7 +335,7 @@ class ReaderViewModel : ViewModel() {
             relativePath = state.currentRelativePath,
             showLoading = showLoading,
         )
-        rebuildSearchIndex(context.applicationContext, state.libraryRoots)
+        markSearchIndexDirty(context.applicationContext, state.libraryRoots)
     }
 
     fun updateSearchQuery(
@@ -349,8 +359,15 @@ class ReaderViewModel : ViewModel() {
 
         val roots = _uiState.value.libraryRoots
         val freshIndex = searchIndexSignature == roots.signature()
-        if (!freshIndex && searchIndexJob?.isActive != true) {
-            rebuildSearchIndex(appContext, roots)
+        if (!freshIndex) {
+            val indexJobActive = searchIndexJob?.isActive == true
+            if (!indexJobActive || searchIndex.isEmpty()) {
+                rebuildSearchIndex(
+                    context = appContext,
+                    roots = roots,
+                    force = indexJobActive,
+                )
+            }
         }
 
         _uiState.update { state ->
@@ -391,11 +408,10 @@ class ReaderViewModel : ViewModel() {
     private fun rebuildSearchIndex(
         context: Context,
         roots: List<LibraryRoot>,
+        force: Boolean = false,
+        delayMillis: Long = 0L,
     ) {
         val signature = roots.signature()
-        val generation = ++searchIndexGeneration
-        requestedSearchIndexSignature = signature
-        searchIndexJob?.cancel()
 
         if (roots.isEmpty()) {
             clearSearchIndex()
@@ -404,6 +420,30 @@ class ReaderViewModel : ViewModel() {
             }
             return
         }
+
+        if (!force && searchIndexSignature == signature && searchIndex.isNotEmpty()) {
+            val currentQuery = _uiState.value.searchQuery
+            val currentResults = filterSearchIndex(currentQuery)
+            _uiState.update { state ->
+                if (state.searchQuery.isBlank()) {
+                    state.copy(isSearching = false)
+                } else {
+                    state.copy(
+                        searchResults = currentResults,
+                        isSearching = false,
+                    )
+                }
+            }
+            return
+        }
+
+        if (!force && requestedSearchIndexSignature == signature && searchIndexJob?.isActive == true) {
+            return
+        }
+
+        val generation = ++searchIndexGeneration
+        requestedSearchIndexSignature = signature
+        searchIndexJob?.cancel()
 
         _uiState.update { state ->
             if (state.searchQuery.isBlank()) {
@@ -415,6 +455,9 @@ class ReaderViewModel : ViewModel() {
 
         val appContext = context.applicationContext
         searchIndexJob = viewModelScope.launch(Dispatchers.IO) {
+            if (delayMillis > 0L && _uiState.value.searchQuery.isBlank()) {
+                delay(delayMillis)
+            }
             val rebuiltIndex = LibraryRepository.buildSearchIndex(appContext, roots)
             if (searchIndexGeneration != generation || requestedSearchIndexSignature != signature) {
                 return@launch
@@ -447,6 +490,27 @@ class ReaderViewModel : ViewModel() {
         requestedSearchIndexSignature = ""
     }
 
+    private fun pauseSearchIndexingForReaderOpen() {
+        searchJob?.cancel()
+        if (searchIndexJob?.isActive == true) {
+            searchIndexJob?.cancel()
+            searchIndexGeneration++
+            requestedSearchIndexSignature = ""
+        }
+    }
+
+    private fun markSearchIndexDirty(
+        context: Context,
+        roots: List<LibraryRoot>,
+    ) {
+        rebuildSearchIndex(
+            context = context.applicationContext,
+            roots = roots,
+            force = true,
+            delayMillis = if (_uiState.value.searchQuery.isBlank()) 350L else 0L,
+        )
+    }
+
     fun openSearchResult(
         context: Context,
         result: LibrarySearchResult,
@@ -468,7 +532,16 @@ class ReaderViewModel : ViewModel() {
 
             LibrarySearchResultType.BOOK -> {
                 val uriString = result.uriString ?: return
-                openDocument(context, Uri.parse(uriString))
+                val uri = Uri.parse(uriString)
+                val document = result.documentType?.let { type ->
+                    ReaderDocument(
+                        uri = uri,
+                        uriString = uriString,
+                        title = result.title,
+                        type = type,
+                    )
+                }
+                openDocument(context, uri, preResolvedDocument = document)
             }
         }
     }
@@ -477,24 +550,36 @@ class ReaderViewModel : ViewModel() {
         context: Context,
         book: LibraryBookEntry,
     ) {
-        openDocument(context, Uri.parse(book.uriString))
+        val uri = Uri.parse(book.uriString)
+        openDocument(
+            context = context,
+            uri = uri,
+            preResolvedDocument = ReaderDocument(
+                uri = uri,
+                uriString = book.uriString,
+                title = book.title,
+                type = book.type,
+            ),
+        )
     }
 
     fun openDocument(
         context: Context,
         uri: Uri,
         fromRecent: Boolean = false,
+        preResolvedDocument: ReaderDocument? = null,
     ) {
         val appContext = context.applicationContext
 
         documentOpenJob?.cancel()
+        pauseSearchIndexingForReaderOpen()
         documentOpenJob = viewModelScope.launch {
             _uiState.update { state ->
                 state.copy(isLoading = true, errorMessage = null)
             }
 
             try {
-                val document = withContext(Dispatchers.IO) {
+                val document = preResolvedDocument ?: withContext(Dispatchers.IO) {
                     DocumentResolver.resolve(appContext, uri)
                 }
                 val savedProgress = _uiState.value.progressByUri[document.uriString]
@@ -579,7 +664,18 @@ class ReaderViewModel : ViewModel() {
         context: Context,
         recent: RecentDocument,
     ) {
-        openDocument(context, Uri.parse(recent.uriString), fromRecent = true)
+        val uri = Uri.parse(recent.uriString)
+        openDocument(
+            context = context,
+            uri = uri,
+            fromRecent = true,
+            preResolvedDocument = ReaderDocument(
+                uri = uri,
+                uriString = recent.uriString,
+                title = recent.title,
+                type = recent.type,
+            ),
+        )
     }
 
     fun removeRecent(
@@ -688,11 +784,11 @@ class ReaderViewModel : ViewModel() {
                         currentFolders = folderState.folders,
                         currentBooks = folderState.books,
                         pinnedLibraryItemIds = updatedPinnedIds,
-                        libraryAddedAtById = ReaderStateStore.loadLibraryAddedAt(appContext),
+                        libraryAddedAtById = libraryAddedAtCache,
                         errorMessage = null,
                     )
                 }
-                rebuildSearchIndex(appContext, updatedRoots)
+                markSearchIndexDirty(appContext, updatedRoots)
             }.onFailure { throwable ->
                 _uiState.update { state ->
                     state.copy(
@@ -709,7 +805,7 @@ class ReaderViewModel : ViewModel() {
                         errorMessage = displayError(throwable, "Unable to open that folder."),
                     )
                 }
-                rebuildSearchIndex(appContext, updatedRoots)
+                markSearchIndexDirty(appContext, updatedRoots)
             }
         }
     }
@@ -758,7 +854,7 @@ class ReaderViewModel : ViewModel() {
                         currentFolders = folderState.folders,
                         currentBooks = folderState.books,
                         libraryFolderPickerEntries = rootPickerEntries(state.libraryRoots),
-                        libraryAddedAtById = ReaderStateStore.loadLibraryAddedAt(appContext),
+                        libraryAddedAtById = libraryAddedAtCache,
                         currentScreen = ReaderScreen.Text(
                             document = document,
                             initialText = "",
@@ -767,7 +863,7 @@ class ReaderViewModel : ViewModel() {
                         errorMessage = null,
                     )
                 }
-                rebuildSearchIndex(appContext, _uiState.value.libraryRoots)
+                markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
                 _uiState.update { state ->
                     state.copy(
@@ -858,7 +954,7 @@ class ReaderViewModel : ViewModel() {
                     return@launch
                 }
                 reloadCurrentLibraryFolder(appContext)
-                rebuildSearchIndex(appContext, _uiState.value.libraryRoots)
+                markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
                 _uiState.update {
                     it.copy(
@@ -901,7 +997,7 @@ class ReaderViewModel : ViewModel() {
                     )
                 }
                 reloadCurrentLibraryFolder(appContext)
-                rebuildSearchIndex(appContext, _uiState.value.libraryRoots)
+                markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
                 _uiState.update {
                     it.copy(
@@ -933,7 +1029,7 @@ class ReaderViewModel : ViewModel() {
                     return@launch
                 }
                 reloadCurrentLibraryFolder(appContext)
-                rebuildSearchIndex(appContext, _uiState.value.libraryRoots)
+                markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
                 _uiState.update {
                     it.copy(
@@ -966,7 +1062,7 @@ class ReaderViewModel : ViewModel() {
                     return@launch
                 }
                 reloadCurrentLibraryFolder(appContext)
-                rebuildSearchIndex(appContext, _uiState.value.libraryRoots)
+                markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
                 _uiState.update {
                     it.copy(
@@ -1072,7 +1168,7 @@ class ReaderViewModel : ViewModel() {
                     )
                 }
                 reloadCurrentLibraryFolder(appContext)
-                rebuildSearchIndex(appContext, _uiState.value.libraryRoots)
+                markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
                 _uiState.update { state ->
                     state.copy(
@@ -1144,7 +1240,7 @@ class ReaderViewModel : ViewModel() {
                     )
                 }
                 reloadCurrentLibraryFolder(appContext)
-                rebuildSearchIndex(appContext, _uiState.value.libraryRoots)
+                markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
                 _uiState.update { state ->
                     state.copy(errorMessage = displayError(throwable, "Unable to rename that note."))
@@ -1219,7 +1315,7 @@ class ReaderViewModel : ViewModel() {
                             pathSegments = folderState.pathSegments,
                             folders = folderState.folders,
                         ),
-                        libraryAddedAtById = ReaderStateStore.loadLibraryAddedAt(appContext),
+                        libraryAddedAtById = libraryAddedAtCache,
                         errorMessage = null,
                     )
                 }
@@ -1407,7 +1503,7 @@ class ReaderViewModel : ViewModel() {
     ): List<LibraryFolderPickerEntry> = rootPickerEntries(roots)
 
     private fun trimEpubCache() {
-        while (epubBookCache.size > 2) {
+        while (epubBookCache.size > 4) {
             val oldestKey = epubBookCache.keys.firstOrNull() ?: return
             epubBookCache.remove(oldestKey)
         }
@@ -1437,8 +1533,10 @@ class ReaderViewModel : ViewModel() {
             )
         }
 
-        if (updatedAddedAt != addedAtById) {
-            ReaderStateStore.saveLibraryAddedAt(context, updatedAddedAt)
+        val savedAddedAt = updatedAddedAt.toMap()
+        libraryAddedAtCache = savedAddedAt
+        if (savedAddedAt != addedAtById) {
+            ReaderStateStore.saveLibraryAddedAt(context, savedAddedAt)
         }
 
         return folderState.copy(
