@@ -8,7 +8,7 @@ It supports EPUB, TXT, and PDF files, with a clean monochrome interface, local l
 
 ## Latest Release
 
-Latest version: **v1.0.1**
+Latest version: **v1.0.2**
 
 Download APK from the latest GitHub release:
 
