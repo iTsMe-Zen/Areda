@@ -17,6 +17,7 @@ import app.areada.data.LibrarySearchIndexEntry
 import app.areada.data.LibrarySearchResult
 import app.areada.data.LibrarySearchResultType
 import app.areada.data.LibrarySortMode
+import app.areada.data.NaturalSort
 import app.areada.data.ReaderPreferences
 import app.areada.data.ReaderDocument
 import app.areada.data.ReaderStateStore
@@ -103,8 +104,12 @@ class ReaderViewModel : ViewModel() {
     private var searchIndexGeneration: Int = 0
     private var libraryAddedAtCache: Map<String, Long> = emptyMap()
 
-    fun initialize(context: Context) {
+    fun initialize(
+        context: Context,
+        externalOpenUri: Uri? = null,
+    ) {
         if (initialized) {
+            externalOpenUri?.let { uri -> openExternalDocument(context, uri) }
             return
         }
         initialized = true
@@ -139,6 +144,7 @@ class ReaderViewModel : ViewModel() {
                         libraryAddedAtById = addedAtById,
                     )
                 }
+                externalOpenUri?.let { uri -> openExternalDocument(appContext, uri) }
                 return@launch
             }
 
@@ -184,6 +190,7 @@ class ReaderViewModel : ViewModel() {
                     roots = libraryRoots,
                     delayMillis = 250L,
                 )
+                externalOpenUri?.let { uri -> openExternalDocument(appContext, uri) }
             }.onFailure {
                 _uiState.update { state ->
                     state.copy(
@@ -205,6 +212,7 @@ class ReaderViewModel : ViewModel() {
                     roots = libraryRoots,
                     delayMillis = 250L,
                 )
+                externalOpenUri?.let { uri -> openExternalDocument(appContext, uri) }
             }
         }
     }
@@ -672,6 +680,21 @@ class ReaderViewModel : ViewModel() {
         }
     }
 
+    fun openExternalDocument(
+        context: Context,
+        uri: Uri,
+    ) {
+        val scheme = uri.scheme?.lowercase(Locale.ROOT)
+        if (scheme != "content" && scheme != "file") {
+            _uiState.update { state ->
+                state.copy(errorMessage = "Unable to open that file.")
+            }
+            return
+        }
+
+        openDocument(context = context, uri = uri)
+    }
+
     fun reopenRecent(
         context: Context,
         recent: RecentDocument,
@@ -688,6 +711,20 @@ class ReaderViewModel : ViewModel() {
                 type = recent.type,
             ),
         )
+    }
+
+    fun removeBookmark(
+        context: Context,
+        bookmark: ReadingBookmark,
+    ) {
+        val appContext = context.applicationContext
+        val updatedBookmarks = _uiState.value.bookmarks.filterNot { it.id == bookmark.id }
+        _uiState.update { state ->
+            state.copy(bookmarks = updatedBookmarks)
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            ReaderStateStore.saveBookmarks(appContext, updatedBookmarks)
+        }
     }
 
     fun openBookmark(
@@ -1770,8 +1807,8 @@ class ReaderViewModel : ViewModel() {
         pinned: (T) -> Boolean,
     ): List<T> {
         val sorted = when (sortMode) {
-            LibrarySortMode.NAME_ASC -> items.sortedBy { title(it).lowercase(Locale.ROOT) }
-            LibrarySortMode.NAME_DESC -> items.sortedByDescending { title(it).lowercase(Locale.ROOT) }
+            LibrarySortMode.NAME_ASC -> items.sortedWith(NaturalSort.comparator(title))
+            LibrarySortMode.NAME_DESC -> items.sortedWith(NaturalSort.comparator(title).reversed())
             LibrarySortMode.DATE_ADDED_ASC -> items.sortedBy { addedAt(it) }
             LibrarySortMode.DATE_ADDED_DESC -> items.sortedByDescending { addedAt(it) }
         }

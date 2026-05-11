@@ -57,7 +57,7 @@ object LibraryRepository {
                     }
                 }.getOrNull()
             }
-            .sortedBy { it.name.lowercase(Locale.ROOT) }
+            .sortedWith(NaturalSort.comparator { it.name })
 
         val books = entries
             .mapNotNull { file ->
@@ -80,7 +80,7 @@ object LibraryRepository {
                     )
                 }.getOrNull()
             }
-            .sortedBy { it.title.lowercase(Locale.ROOT) }
+            .sortedWith(NaturalSort.comparator { it.title })
 
         return LibraryFolderState(
             root = root,

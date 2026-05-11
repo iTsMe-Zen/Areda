@@ -8,9 +8,11 @@ import android.provider.OpenableColumns
 object DocumentResolver {
     fun resolve(context: Context, uri: Uri): ReaderDocument {
         val contentResolver = context.contentResolver
-        val displayName = queryDisplayName(contentResolver, uri) ?: uri.lastPathSegment ?: "Untitled"
+        val displayName = runCatching { queryDisplayName(contentResolver, uri) }.getOrNull()
+            ?: uri.lastPathSegment
+            ?: "Untitled"
         val documentType = detectSupportedType(null, displayName)
-            ?: detectSupportedType(contentResolver.getType(uri), displayName)
+            ?: detectSupportedType(runCatching { contentResolver.getType(uri) }.getOrNull(), displayName)
             ?: error("Only EPUB, PDF, and TXT files are supported.")
         val title = displayName.substringBeforeLast('.', displayName).ifBlank { displayName }
 
@@ -23,11 +25,18 @@ object DocumentResolver {
     }
 
     fun detectSupportedType(mimeType: String?, name: String): DocumentType? {
+        val normalizedMime = mimeType
+            ?.substringBefore(';')
+            ?.trim()
+            ?.lowercase()
         val lowerName = name.lowercase()
         return when {
-            mimeType == "application/epub+zip" || lowerName.endsWith(".epub") -> DocumentType.EPUB
-            mimeType == "application/pdf" || lowerName.endsWith(".pdf") -> DocumentType.PDF
-            mimeType == "text/plain" || lowerName.endsWith(".txt") -> DocumentType.TXT
+            normalizedMime == "application/epub+zip" ||
+                normalizedMime == "application/x-epub" ||
+                normalizedMime == "application/epub" ||
+                lowerName.endsWith(".epub") -> DocumentType.EPUB
+            normalizedMime == "application/pdf" || lowerName.endsWith(".pdf") -> DocumentType.PDF
+            normalizedMime == "text/plain" || lowerName.endsWith(".txt") -> DocumentType.TXT
             else -> null
         }
     }

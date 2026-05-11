@@ -1,0 +1,4 @@
+Fixed natural sorting for numbered book and file names.
+Added swipe action to remove bookmarks.
+Added Android Open with support for PDF, EPUB, and TXT files.
+Added Fastlane app icon metadata for F-Droid.

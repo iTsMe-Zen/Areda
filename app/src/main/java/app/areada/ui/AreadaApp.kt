@@ -160,7 +160,11 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 @Composable
-fun AreadaApp(viewModel: ReaderViewModel = viewModel()) {
+fun AreadaApp(
+    externalOpenUri: Uri? = null,
+    onExternalOpenHandled: () -> Unit = {},
+    viewModel: ReaderViewModel = viewModel(),
+) {
     val localContext = LocalContext.current
     val context = localContext.applicationContext
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -173,8 +177,11 @@ fun AreadaApp(viewModel: ReaderViewModel = viewModel()) {
         }
     }
 
-    LaunchedEffect(viewModel, context) {
-        viewModel.initialize(context)
+    LaunchedEffect(viewModel, context, externalOpenUri) {
+        viewModel.initialize(context, externalOpenUri)
+        if (externalOpenUri != null) {
+            onExternalOpenHandled()
+        }
     }
 
     BackHandler {
@@ -239,6 +246,7 @@ fun AreadaApp(viewModel: ReaderViewModel = viewModel()) {
                         onOpenBook = { book -> viewModel.openLibraryBook(context, book) },
                         onOpenRecent = { recent -> viewModel.reopenRecent(context, recent) },
                         onOpenBookmark = { bookmark -> viewModel.openBookmark(context, bookmark) },
+                        onRemoveBookmark = { bookmark -> viewModel.removeBookmark(context, bookmark) },
                         onRemoveRecent = { recent -> viewModel.removeRecent(context, recent) },
                         onSortModeChange = { sortMode -> viewModel.updateLibrarySortMode(context, sortMode) },
                         onDeleteFolder = { folder -> viewModel.deleteLibraryFolder(context, folder) },
@@ -381,6 +389,7 @@ private fun HomeScreen(
     onOpenBook: (LibraryBookEntry) -> Unit,
     onOpenRecent: (RecentDocument) -> Unit,
     onOpenBookmark: (ReadingBookmark) -> Unit,
+    onRemoveBookmark: (ReadingBookmark) -> Unit,
     onRemoveRecent: (RecentDocument) -> Unit,
     onSortModeChange: (LibrarySortMode) -> Unit,
     onDeleteFolder: (LibraryFolderEntry) -> Unit,
@@ -649,6 +658,7 @@ private fun HomeScreen(
                     expanded = showBookmarks,
                     onToggleExpanded = { showBookmarks = !showBookmarks },
                     onOpenBookmark = onOpenBookmark,
+                    onRemoveBookmark = onRemoveBookmark,
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 SearchBar(
@@ -1300,6 +1310,7 @@ private fun BookmarksSection(
     expanded: Boolean,
     onToggleExpanded: () -> Unit,
     onOpenBookmark: (ReadingBookmark) -> Unit,
+    onRemoveBookmark: (ReadingBookmark) -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -1336,6 +1347,7 @@ private fun BookmarksSection(
                     BookmarkRow(
                         bookmark = bookmark,
                         onClick = { onOpenBookmark(bookmark) },
+                        onRemove = { onRemoveBookmark(bookmark) },
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                 }
@@ -1348,14 +1360,20 @@ private fun BookmarksSection(
 private fun BookmarkRow(
     bookmark: ReadingBookmark,
     onClick: () -> Unit,
+    onRemove: () -> Unit,
 ) {
-    BookRow(
-        title = bookmark.title,
-        type = bookmark.type,
-        progressLabel = bookmark.positionLabel,
-        pinned = false,
-        onClick = onClick,
-    )
+    SwipeActionBox(
+        actionLabel = "Remove",
+        onSwipe = onRemove,
+    ) {
+        BookRow(
+            title = bookmark.title,
+            type = bookmark.type,
+            progressLabel = bookmark.positionLabel,
+            pinned = false,
+            onClick = onClick,
+        )
+    }
 }
 @Composable
 private fun SearchResults(

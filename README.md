@@ -14,19 +14,16 @@ Areada supports EPUB, TXT, and PDF files, with a clean monochrome interface, loc
 
 ## Latest Release
 
-Latest version: **v1.0.5**
+Latest version: **v1.0.6**
 
-Download APK from the latest GitHub release:
-
-https://github.com/iTsMe-Zen/Areada/releases/latest
-
-## Supported Formats
-
-- EPUB
-- TXT
-- PDF
-
-## Features
+<p>
+  <a href="https://github.com/iTsMe-Zen/Areada/releases/latest">
+    <img src="https://img.shields.io/badge/GitHub-Download-111111?logo=github&logoColor=white" alt="Download from GitHub" />
+  </a>
+  <a href="https://f-droid.org/en/packages/app.areada/">
+    <img src="https://img.shields.io/badge/F--Droid-Download-111111?logo=fdroid&logoColor=white" alt="Download from F-Droid" />
+  </a>
+</p>
 
 ## Features
 
