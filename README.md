@@ -25,7 +25,7 @@ Latest version: **v1.0.6**
   </a>
 </p>
 
-> **Note:** For the newest APK, use GitHub releases. For easier installation and updates through the F-Droid app, use F-Droid. F-Droid updates may appear later than GitHub releases.
+> **Note:** For the newest APK, use GitHub releases. The latest version may appear on GitHub before F-Droid. F-Droid updates can take some time to become available.
 
 ## Features
 
