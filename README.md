@@ -25,6 +25,8 @@ Latest version: **v1.0.6**
   </a>
 </p>
 
+> **Note:** GitHub releases may receive updates first. The F-Droid version can take some time to appear because F-Droid builds and publishes apps through its own release process.
+
 ## Features
 
 - **Local reading:** EPUB, TXT, and PDF support with saved reading progress
