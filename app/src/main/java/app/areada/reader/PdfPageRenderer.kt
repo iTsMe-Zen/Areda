@@ -9,6 +9,11 @@ import android.net.Uri
 import java.io.Closeable
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
+
+private const val PdfRenderScale = 2.25f
+private const val PdfMaxRenderWidthPx = 2800
+private const val PdfMaxBitmapPixels = 10_000_000
 
 class PdfPageRenderer(
     context: Context,
@@ -30,10 +35,17 @@ class PdfPageRenderer(
             require(pageIndex in 0 until renderer.pageCount) { "Page out of range." }
 
             val safeWidth = max(widthPx, 1)
-            val renderWidth = (safeWidth * 2).coerceIn(safeWidth, 2400)
             val page = renderer.openPage(pageIndex)
             try {
                 val aspectRatio = page.height.toFloat() / page.width.toFloat()
+                val targetWidth = (safeWidth * PdfRenderScale)
+                    .roundToInt()
+                    .coerceAtLeast(safeWidth)
+                    .coerceAtMost(PdfMaxRenderWidthPx)
+                val pixelCappedWidth = sqrt(PdfMaxBitmapPixels / aspectRatio)
+                    .roundToInt()
+                    .coerceAtLeast(1)
+                val renderWidth = targetWidth.coerceAtMost(pixelCappedWidth)
                 val heightPx = max((renderWidth * aspectRatio).roundToInt(), 1)
                 val bitmap = Bitmap.createBitmap(renderWidth, heightPx, Bitmap.Config.ARGB_8888)
                 bitmap.eraseColor(Color.WHITE)

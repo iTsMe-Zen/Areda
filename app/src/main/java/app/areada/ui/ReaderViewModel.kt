@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.areada.data.AreadaCacheManager
 import app.areada.data.DocumentResolver
 import app.areada.data.DocumentType
 import app.areada.data.LibraryBookEntry
@@ -38,7 +39,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.Locale
 
 data class ReaderUiState(
@@ -98,11 +102,28 @@ class ReaderViewModel : ViewModel() {
     private var documentOpenJob: Job? = null
     private var searchJob: Job? = null
     private var searchIndexJob: Job? = null
+    private var cacheCleanupJob: Job? = null
     private var searchIndex: List<LibrarySearchIndexEntry> = emptyList()
     private var searchIndexSignature: String = ""
     private var requestedSearchIndexSignature: String = ""
     private var searchIndexGeneration: Int = 0
     private var libraryAddedAtCache: Map<String, Long> = emptyMap()
+    private var applicationContext: Context? = null
+    private val textSaveMutex = Mutex()
+    private val textSaveSequenceByUri = mutableMapOf<String, Long>()
+    private val folderStateCacheLock = Any()
+    private val folderStateCache = linkedMapOf<FolderCacheKey, CachedFolderState>()
+    private val folderCacheFreshMillis = 60_000L
+
+    private data class FolderCacheKey(
+        val rootUriString: String,
+        val relativePath: String,
+    )
+
+    private data class CachedFolderState(
+        val folderState: app.areada.data.LibraryFolderState,
+        val loadedAtMillis: Long,
+    )
 
     fun initialize(
         context: Context,
@@ -115,6 +136,7 @@ class ReaderViewModel : ViewModel() {
         initialized = true
 
         val appContext = context.applicationContext
+        applicationContext = appContext
         viewModelScope.launch(Dispatchers.IO) {
             val recents = RecentDocumentStore.load(appContext)
                 .sortedByDescending { it.lastOpenedAt }
@@ -144,6 +166,9 @@ class ReaderViewModel : ViewModel() {
                         libraryAddedAtById = addedAtById,
                     )
                 }
+                if (externalOpenUri == null) {
+                    scheduleCacheCleanup(appContext)
+                }
                 externalOpenUri?.let { uri -> openExternalDocument(appContext, uri) }
                 return@launch
             }
@@ -162,6 +187,7 @@ class ReaderViewModel : ViewModel() {
                     addedAtById = addedAtById,
                 )
             }.onSuccess { folderState ->
+                cacheFolderState(initialRoot, folderState)
                 _uiState.update { state ->
                     state.copy(
                         recents = recents,
@@ -190,6 +216,9 @@ class ReaderViewModel : ViewModel() {
                     roots = libraryRoots,
                     delayMillis = 250L,
                 )
+                if (externalOpenUri == null) {
+                    scheduleCacheCleanup(appContext)
+                }
                 externalOpenUri?.let { uri -> openExternalDocument(appContext, uri) }
             }.onFailure {
                 _uiState.update { state ->
@@ -212,6 +241,9 @@ class ReaderViewModel : ViewModel() {
                     roots = libraryRoots,
                     delayMillis = 250L,
                 )
+                if (externalOpenUri == null) {
+                    scheduleCacheCleanup(appContext)
+                }
                 externalOpenUri?.let { uri -> openExternalDocument(appContext, uri) }
             }
         }
@@ -254,6 +286,7 @@ class ReaderViewModel : ViewModel() {
                         addedAtById = _uiState.value.libraryAddedAtById,
                     )
                 }
+                cacheFolderState(resolvedRoot, folderState)
 
                 _uiState.update { state ->
                     state.copy(
@@ -305,8 +338,12 @@ class ReaderViewModel : ViewModel() {
         context: Context,
         relativePath: String,
     ) {
-        val root = _uiState.value.libraryRoots.firstOrNull { it.treeUriString == _uiState.value.selectedRootUriString }
+        val state = _uiState.value
+        val root = state.libraryRoots.firstOrNull { it.treeUriString == state.selectedRootUriString }
             ?: return
+        if (state.currentRelativePath == relativePath) {
+            return
+        }
         loadLibraryFolder(context, root, relativePath)
     }
 
@@ -347,11 +384,16 @@ class ReaderViewModel : ViewModel() {
 
         val root = state.libraryRoots.firstOrNull { it.treeUriString == state.selectedRootUriString }
             ?: return
+        if (showLoading) {
+            clearFolderStateCache()
+            LibraryRepository.clearFolderNavigationCache(root.treeUriString)
+        }
         loadLibraryFolder(
             context = context,
             root = root,
             relativePath = state.currentRelativePath,
             showLoading = showLoading,
+            useCache = !showLoading,
         )
         markSearchIndexDirty(context.applicationContext, state.libraryRoots)
     }
@@ -605,13 +647,16 @@ class ReaderViewModel : ViewModel() {
 
                 val screen = when (document.type) {
                     DocumentType.EPUB -> {
+                        cancelCacheCleanup()
                         val book = withContext(Dispatchers.IO) {
-                            epubBookCache[document.uriString] ?: EpubEngine
-                                .parse(appContext, document.uri, document.title)
-                                .also { parsedBook ->
-                                    epubBookCache[document.uriString] = parsedBook
-                                    trimEpubCache()
-                                }
+                            epubBookCache[document.uriString]
+                                ?.takeIf { cachedBook -> EpubEngine.isCacheUsable(cachedBook) }
+                                ?: EpubEngine
+                                    .parse(appContext, document.uri, document.title)
+                                    .also { parsedBook ->
+                                        epubBookCache[document.uriString] = parsedBook
+                                        trimEpubCache()
+                                    }
                         }
                         ReaderScreen.Epub(
                             document = document,
@@ -764,9 +809,9 @@ class ReaderViewModel : ViewModel() {
                 title = document.title,
                 type = document.type,
                 positionLabel = if (safeCount > 0) {
-                    "Chapter ${safeIndex + 1} of $safeCount"
+                    "Section ${safeIndex + 1} of $safeCount"
                 } else {
-                    "Chapter ${safeIndex + 1}"
+                    "Section ${safeIndex + 1}"
                 },
                 epubChapterIndex = safeIndex,
                 epubChapterCount = safeCount,
@@ -873,6 +918,8 @@ class ReaderViewModel : ViewModel() {
                 ReaderStateStore.savePinnedLibraryItemIds(appContext, updatedPinnedIds)
                 ReaderStateStore.saveLibraryAddedAt(appContext, updatedAddedAt)
             }
+            removeCachedRoot(root.treeUriString)
+            LibraryRepository.clearFolderNavigationCache(root.treeUriString)
 
             if (updatedRoots.isEmpty()) {
                 clearSearchIndex()
@@ -917,6 +964,7 @@ class ReaderViewModel : ViewModel() {
                     )
                 }
             }.onSuccess { folderState ->
+                cacheFolderState(nextRoot, folderState)
                 _uiState.update { state ->
                     state.copy(
                         isLoading = false,
@@ -966,7 +1014,7 @@ class ReaderViewModel : ViewModel() {
 
         viewModelScope.launch {
             _uiState.update { state ->
-                state.copy(isLoading = true, errorMessage = null)
+                state.copy(errorMessage = null)
             }
 
             runCatching {
@@ -980,30 +1028,48 @@ class ReaderViewModel : ViewModel() {
                     title = note.title,
                     type = DocumentType.TXT,
                 )
-                val folderState = withContext(Dispatchers.IO) {
-                    prepareFolderState(
-                        context = appContext,
-                        folderState = LibraryRepository.loadFolder(appContext, root, relativePath),
-                        sortMode = _uiState.value.librarySortMode,
-                        pinnedIds = _uiState.value.pinnedLibraryItemIds,
-                        addedAtById = _uiState.value.libraryAddedAtById,
+                val stateBeforeUpdate = _uiState.value
+                val now = System.currentTimeMillis()
+                val decoratedNote = note.copy(
+                    addedAt = stateBeforeUpdate.libraryAddedAtById[note.id] ?: now,
+                    pinned = note.id in stateBeforeUpdate.pinnedLibraryItemIds,
+                )
+                val updatedAddedAt = stateBeforeUpdate.libraryAddedAtById + (note.id to decoratedNote.addedAt)
+                libraryAddedAtCache = updatedAddedAt
+                val updatedBooks = sortBooks(
+                    books = stateBeforeUpdate.currentBooks.filterNot { book -> book.id == note.id } + decoratedNote,
+                    sortMode = stateBeforeUpdate.librarySortMode,
+                )
+                val updatedRecents = buildUpdatedRecents(stateBeforeUpdate.recents, document)
+                if (
+                    stateBeforeUpdate.selectedRootUriString == root.treeUriString &&
+                    stateBeforeUpdate.currentRelativePath == relativePath
+                ) {
+                    cacheFolderState(
+                        root = root,
+                        folderState = app.areada.data.LibraryFolderState(
+                            root = root,
+                            currentRelativePath = relativePath,
+                            pathSegments = stateBeforeUpdate.currentPathSegments,
+                            folders = stateBeforeUpdate.currentFolders,
+                            books = updatedBooks,
+                        ),
                     )
-                }
-                val updatedRecents = withContext(Dispatchers.IO) {
-                    buildUpdatedRecents(_uiState.value.recents, document).also { recents ->
-                        RecentDocumentStore.save(appContext, recents)
-                    }
                 }
 
                 _uiState.update { state ->
                     state.copy(
                         isLoading = false,
                         recents = updatedRecents,
-                        currentPathSegments = folderState.pathSegments,
-                        currentFolders = folderState.folders,
-                        currentBooks = folderState.books,
-                        libraryFolderPickerEntries = rootPickerEntries(state.libraryRoots),
-                        libraryAddedAtById = libraryAddedAtCache,
+                        currentBooks = if (
+                            state.selectedRootUriString == root.treeUriString &&
+                            state.currentRelativePath == relativePath
+                        ) {
+                            updatedBooks
+                        } else {
+                            state.currentBooks
+                        },
+                        libraryAddedAtById = updatedAddedAt,
                         currentScreen = ReaderScreen.Text(
                             document = document,
                             initialText = "",
@@ -1012,6 +1078,10 @@ class ReaderViewModel : ViewModel() {
                         ),
                         errorMessage = null,
                     )
+                }
+                viewModelScope.launch(Dispatchers.IO) {
+                    RecentDocumentStore.save(appContext, updatedRecents)
+                    ReaderStateStore.saveLibraryAddedAt(appContext, updatedAddedAt)
                 }
                 markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
@@ -1030,6 +1100,7 @@ class ReaderViewModel : ViewModel() {
         _uiState.update { state ->
             state.copy(currentScreen = ReaderScreen.Home)
         }
+        applicationContext?.let { context -> scheduleCacheCleanup(context) }
     }
 
     fun dismissError() {
@@ -1061,6 +1132,7 @@ class ReaderViewModel : ViewModel() {
         sortMode: LibrarySortMode,
     ) {
         val appContext = context.applicationContext
+        clearFolderStateCache()
         _uiState.update { state ->
             state.copy(librarySortMode = sortMode)
         }
@@ -1103,6 +1175,8 @@ class ReaderViewModel : ViewModel() {
                     }
                     return@launch
                 }
+                LibraryRepository.clearFolderNavigationCache(root.treeUriString)
+                clearFolderStateCache()
                 reloadCurrentLibraryFolder(appContext)
                 markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
@@ -1149,6 +1223,7 @@ class ReaderViewModel : ViewModel() {
                         bookmarks = updatedBookmarks,
                     )
                 }
+                clearFolderStateCache()
                 reloadCurrentLibraryFolder(appContext)
                 markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
@@ -1181,6 +1256,8 @@ class ReaderViewModel : ViewModel() {
                     }
                     return@launch
                 }
+                LibraryRepository.clearFolderNavigationCache(root.treeUriString)
+                clearFolderStateCache()
                 reloadCurrentLibraryFolder(appContext)
                 markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
@@ -1214,6 +1291,7 @@ class ReaderViewModel : ViewModel() {
                     }
                     return@launch
                 }
+                clearFolderStateCache()
                 reloadCurrentLibraryFolder(appContext)
                 markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
@@ -1289,8 +1367,22 @@ class ReaderViewModel : ViewModel() {
         text: String,
     ) {
         val appContext = context.applicationContext
+        val uriString = document.uriString
+        val saveSequence = synchronized(textSaveSequenceByUri) {
+            val nextSequence = (textSaveSequenceByUri[uriString] ?: 0L) + 1L
+            textSaveSequenceByUri[uriString] = nextSequence
+            nextSequence
+        }
         viewModelScope.launch(Dispatchers.IO) {
-            val saved = LibraryRepository.saveText(appContext, document.uri, text)
+            val saved = textSaveMutex.withLock {
+                val isLatestQueuedSave = synchronized(textSaveSequenceByUri) {
+                    textSaveSequenceByUri[uriString] == saveSequence
+                }
+                if (!isLatestQueuedSave) {
+                    return@withLock true
+                }
+                LibraryRepository.saveText(appContext, document.uri, text)
+            }
             if (!saved) {
                 _uiState.update { state ->
                     val currentScreen = state.currentScreen
@@ -1339,6 +1431,7 @@ class ReaderViewModel : ViewModel() {
                         currentScreen = ReaderScreen.Home,
                     )
                 }
+                clearFolderStateCache()
                 reloadCurrentLibraryFolder(appContext)
                 markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
@@ -1420,6 +1513,7 @@ class ReaderViewModel : ViewModel() {
                         },
                     )
                 }
+                clearFolderStateCache()
                 reloadCurrentLibraryFolder(appContext)
                 markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
@@ -1447,13 +1541,51 @@ class ReaderViewModel : ViewModel() {
         root: LibraryRoot,
         relativePath: String,
         showLoading: Boolean = true,
+        useCache: Boolean = true,
     ) {
         val appContext = context.applicationContext
+        val cachedFolderState = if (useCache) {
+            cachedFolderState(root, relativePath)
+        } else {
+            null
+        }
         libraryLoadJob?.cancel()
+        val cachedFolder = cachedFolderState?.folderState
+        val shouldRefreshCachedFolder = cachedFolderState?.let { cached ->
+            System.currentTimeMillis() - cached.loadedAtMillis > folderCacheFreshMillis
+        } == true
+        if (cachedFolder != null) {
+            _uiState.update { state ->
+                state.copy(
+                    isLoading = false,
+                    selectedRootUriString = root.treeUriString,
+                    currentRelativePath = cachedFolder.currentRelativePath,
+                    currentPathSegments = cachedFolder.pathSegments,
+                    currentFolders = cachedFolder.folders,
+                    currentBooks = cachedFolder.books,
+                    libraryFolderPickerEntries = buildFolderPickerEntries(
+                        roots = state.libraryRoots,
+                        selectedRoot = root,
+                        pathSegments = cachedFolder.pathSegments,
+                        folders = cachedFolder.folders,
+                    ),
+                    libraryAddedAtById = libraryAddedAtCache,
+                    errorMessage = null,
+                )
+            }
+            if (!shouldRefreshCachedFolder) {
+                return
+            }
+        }
+
         libraryLoadJob = viewModelScope.launch {
-            if (showLoading) {
+            if (showLoading && cachedFolder == null) {
                 _uiState.update { state ->
                     state.copy(isLoading = true, errorMessage = null)
+                }
+            } else if (cachedFolder == null) {
+                _uiState.update { state ->
+                    state.copy(errorMessage = null)
                 }
             }
 
@@ -1472,9 +1604,10 @@ class ReaderViewModel : ViewModel() {
                     )
                 }
             }.onSuccess { folderState ->
+                cacheFolderState(root, folderState)
                 _uiState.update { state ->
                     if (
-                        !showLoading &&
+                        (cachedFolder != null || !showLoading) &&
                         state.selectedRootUriString == root.treeUriString &&
                         state.currentRelativePath == folderState.currentRelativePath &&
                         sameFolders(state.currentFolders, folderState.folders) &&
@@ -1660,12 +1793,38 @@ class ReaderViewModel : ViewModel() {
     private fun currentRoot(): LibraryRoot? =
         _uiState.value.libraryRoots.firstOrNull { it.treeUriString == _uiState.value.selectedRootUriString }
 
+    private fun protectedCacheRootsFor(screen: ReaderScreen): Set<File> =
+        when (screen) {
+            is ReaderScreen.Epub -> setOf(screen.book.extractedRoot)
+            else -> emptySet()
+        }
+
+    private fun scheduleCacheCleanup(
+        context: Context,
+        protectedRoots: Set<File> = activeReaderCacheRoots(),
+    ) {
+        val appContext = context.applicationContext
+        cacheCleanupJob?.cancel()
+        cacheCleanupJob = viewModelScope.launch(Dispatchers.IO) {
+            AreadaCacheManager.cleanup(appContext, protectedRoots)
+        }
+    }
+
+    private fun cancelCacheCleanup() {
+        cacheCleanupJob?.cancel()
+        cacheCleanupJob = null
+    }
+
+    private fun activeReaderCacheRoots(): Set<File> =
+        protectedCacheRootsFor(_uiState.value.currentScreen)
+
     private fun reloadCurrentLibraryFolder(context: Context) {
         val root = currentRoot() ?: return
         loadLibraryFolder(
             context = context,
             root = root,
             relativePath = _uiState.value.currentRelativePath,
+            useCache = false,
         )
     }
 
@@ -1687,7 +1846,51 @@ class ReaderViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             ReaderStateStore.savePinnedLibraryItemIds(appContext, updatedPinnedIds)
         }
+        clearFolderStateCache()
         reloadCurrentLibraryFolder(context)
+    }
+
+    private fun cachedFolderState(
+        root: LibraryRoot,
+        relativePath: String,
+    ): CachedFolderState? =
+        synchronized(folderStateCacheLock) {
+            val key = FolderCacheKey(root.treeUriString, relativePath)
+            val cached = folderStateCache.remove(key)
+            if (cached != null) {
+                folderStateCache[key] = cached
+            }
+            cached
+        }
+
+    private fun cacheFolderState(
+        root: LibraryRoot,
+        folderState: app.areada.data.LibraryFolderState,
+    ) {
+        synchronized(folderStateCacheLock) {
+            folderStateCache[FolderCacheKey(root.treeUriString, folderState.currentRelativePath)] = CachedFolderState(
+                folderState = folderState,
+                loadedAtMillis = System.currentTimeMillis(),
+            )
+            while (folderStateCache.size > 48 && folderStateCache.isNotEmpty()) {
+                val oldestKey = folderStateCache.keys.first()
+                folderStateCache.remove(oldestKey)
+            }
+        }
+    }
+
+    private fun removeCachedRoot(rootUriString: String) {
+        synchronized(folderStateCacheLock) {
+            val keysToRemove = folderStateCache.keys
+                .filter { key -> key.rootUriString == rootUriString }
+            keysToRemove.forEach { key -> folderStateCache.remove(key) }
+        }
+    }
+
+    private fun clearFolderStateCache() {
+        synchronized(folderStateCacheLock) {
+            folderStateCache.clear()
+        }
     }
 
     private fun sameFolders(

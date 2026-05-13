@@ -11,8 +11,9 @@
         android:usesCleartextTraffic="false">
         <activity
             android:name=".MainActivity"
+            android:documentLaunchMode="never"
             android:exported="true"
-            android:launchMode="singleTop"
+            android:launchMode="singleTask"
             android:theme="@style/Theme.Areada">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

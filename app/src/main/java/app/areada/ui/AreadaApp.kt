@@ -27,7 +27,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -43,6 +44,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -55,21 +57,27 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AccessTime
 import androidx.compose.material.icons.outlined.ArrowDropDown
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FormatListBulleted
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.ImportContacts
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.LibraryBooks
 import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Redo
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Undo
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -98,6 +106,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -111,12 +120,24 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -124,6 +145,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import app.areada.R
 import app.areada.data.DocumentType
 import app.areada.data.LibraryBookEntry
 import app.areada.data.LibraryFolderEntry
@@ -151,13 +173,21 @@ import app.areada.reader.RenderedChapter
 import app.areada.ui.theme.ReaderTheme
 import java.io.ByteArrayInputStream
 import java.net.URI
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
+
+interface VolumePageTurnHost {
+    fun setVolumePageTurnHandler(handler: ((volumeUp: Boolean) -> Boolean)?)
+}
 
 @Composable
 fun AreadaApp(
@@ -421,6 +451,12 @@ private fun HomeScreen(
     var deleteTarget by remember {
         mutableStateOf<LibraryActionTarget?>(null)
     }
+    var bookmarkRemovalTarget by remember {
+        mutableStateOf<ReadingBookmark?>(null)
+    }
+    var recentRemovalTarget by remember {
+        mutableStateOf<RecentDocument?>(null)
+    }
     var renameText by rememberSaveable {
         mutableStateOf("")
     }
@@ -494,6 +530,28 @@ private fun HomeScreen(
                     is LibraryActionTarget.Book -> onDeleteBook(target.book)
                 }
                 deleteTarget = null
+            },
+        )
+    }
+
+    bookmarkRemovalTarget?.let { bookmark ->
+        CompactChoiceDialog(
+            question = "Remove?",
+            onDismiss = { bookmarkRemovalTarget = null },
+            onYes = {
+                onRemoveBookmark(bookmark)
+                bookmarkRemovalTarget = null
+            },
+        )
+    }
+
+    recentRemovalTarget?.let { recent ->
+        CompactChoiceDialog(
+            question = "Remove?",
+            onDismiss = { recentRemovalTarget = null },
+            onYes = {
+                onRemoveRecent(recent)
+                recentRemovalTarget = null
             },
         )
     }
@@ -658,7 +716,7 @@ private fun HomeScreen(
                     expanded = showBookmarks,
                     onToggleExpanded = { showBookmarks = !showBookmarks },
                     onOpenBookmark = onOpenBookmark,
-                    onRemoveBookmark = onRemoveBookmark,
+                    onRemoveBookmark = { bookmark -> bookmarkRemovalTarget = bookmark },
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 SearchBar(
@@ -690,7 +748,7 @@ private fun HomeScreen(
                 ) { recent ->
                     SwipeActionBox(
                         actionLabel = "Remove",
-                        onSwipe = { onRemoveRecent(recent) },
+                        onSwipe = { recentRemovalTarget = recent },
                     ) {
                         BookRow(
                             title = recent.title,
@@ -806,6 +864,40 @@ private fun KeepReaderScreenAwake(enabled: Boolean) {
         onDispose {
             if (enabled) {
                 window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+    }
+}
+
+@Composable
+private fun VolumePageTurnEffect(
+    enabled: Boolean,
+    inverted: Boolean,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+) {
+    val host = LocalContext.current.findActivity() as? VolumePageTurnHost
+    val latestPrevious by rememberUpdatedState(onPrevious)
+    val latestNext by rememberUpdatedState(onNext)
+
+    DisposableEffect(host, enabled, inverted) {
+        if (enabled && host != null) {
+            host.setVolumePageTurnHandler { volumeUp ->
+                val goNext = if (inverted) volumeUp else !volumeUp
+                if (goNext) {
+                    latestNext()
+                } else {
+                    latestPrevious()
+                }
+                true
+            }
+        } else {
+            host?.setVolumePageTurnHandler(null)
+        }
+
+        onDispose {
+            if (enabled) {
+                host?.setVolumePageTurnHandler(null)
             }
         }
     }
@@ -958,6 +1050,7 @@ private fun GoToPositionDialog(
     label: String,
     currentIndex: Int,
     total: Int,
+    title: String = "Go to:",
     onDismiss: () -> Unit,
     onConfirm: (Int) -> Unit,
 ) {
@@ -987,7 +1080,7 @@ private fun GoToPositionDialog(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = "Go to:",
+                        text = title,
                         style = MaterialTheme.typography.headlineSmall,
                     )
                     Text(
@@ -1044,7 +1137,7 @@ private fun CompactChoiceDialog(
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Surface(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth(0.82f),
             shape = RectangleShape,
             color = MaterialTheme.colorScheme.background,
             tonalElevation = 0.dp,
@@ -1053,24 +1146,24 @@ private fun CompactChoiceDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 16.dp),
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
             ) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(58.dp),
+                        .height(38.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         text = question,
-                        style = MaterialTheme.typography.headlineSmall,
+                        style = MaterialTheme.typography.titleLarge,
                         maxLines = 1,
                     )
                 }
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(6.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     PromptChoiceButton(
                         label = "Yes",
@@ -1115,7 +1208,7 @@ private fun PromptChoiceButton(
     }
     Surface(
         modifier = modifier
-            .height(44.dp)
+            .height(40.dp)
             .clickable(enabled = enabled, onClick = onClick),
         shape = RectangleShape,
         color = effectiveBackground,
@@ -1299,7 +1392,7 @@ private fun SearchBar(
             }
         },
         placeholder = {
-            Text(text = "Search folders and files")
+            Text(text = "Search folders, files, notes")
         },
     )
 }
@@ -1728,6 +1821,24 @@ private fun EpubReaderScreen(
     var showGoToChapter by rememberSaveable(screen.document.uriString) {
         mutableStateOf(false)
     }
+    var showChapterSearch by rememberSaveable(screen.document.uriString) {
+        mutableStateOf(false)
+    }
+    var chapterSearchQuery by rememberSaveable(screen.document.uriString) {
+        mutableStateOf("")
+    }
+    var chapterSearchCurrent by rememberSaveable(screen.document.uriString) {
+        mutableIntStateOf(0)
+    }
+    var chapterSearchCount by rememberSaveable(screen.document.uriString) {
+        mutableIntStateOf(0)
+    }
+    var chapterSearchRequest by rememberSaveable(screen.document.uriString) {
+        mutableIntStateOf(0)
+    }
+    var chapterSearchBackwards by rememberSaveable(screen.document.uriString) {
+        mutableStateOf(false)
+    }
     var chapterIndex by rememberSaveable(screen.document.uriString, screen.initialChapterIndex) {
         mutableIntStateOf(screen.initialChapterIndex.coerceIn(0, screen.book.chapters.lastIndex.coerceAtLeast(0)))
     }
@@ -1745,11 +1856,17 @@ private fun EpubReaderScreen(
         mutableStateOf<String?>(null)
     }
     val renderPalette = rememberReaderRenderPalette(preferences.themeMode)
+    val sectionLabel = "Section ${chapterIndex + 1} / ${screen.book.chapters.size}"
+    val topSubtitle = renderedChapter
+        ?.title
+        ?.ifBlank { null }
+        ?: screen.book.chapters.getOrNull(chapterIndex)?.title?.ifBlank { null }
+        ?: sectionLabel
     val tocEntries = remember(screen.book.chapters) {
         screen.book.chapters.mapIndexed { index, chapter ->
             ReaderTocEntry(
                 index = index,
-                label = chapter.title.ifBlank { "Chapter ${index + 1}" },
+                label = chapter.title.ifBlank { "Section ${index + 1}" },
             )
         }
     }
@@ -1764,6 +1881,9 @@ private fun EpubReaderScreen(
         }
         chapterIndex = nextIndex
         scrollFraction = 0f
+        chapterSearchQuery = ""
+        chapterSearchCurrent = 0
+        chapterSearchCount = 0
         onSaveProgress(nextIndex, screen.book.chapters.size, 0f)
     }
 
@@ -1813,7 +1933,7 @@ private fun EpubReaderScreen(
                 renderedChapter = chapter
             }
             .onFailure { throwable ->
-                chapterError = displayError(throwable, "Unable to render this chapter.")
+                chapterError = displayError(throwable, "Unable to render this section.")
             }
     }
 
@@ -1827,9 +1947,10 @@ private fun EpubReaderScreen(
     }
     if (showGoToChapter) {
         GoToPositionDialog(
-            label = "Chapter",
+            label = "Section",
             currentIndex = chapterIndex,
             total = screen.book.chapters.size,
+            title = "Go to section",
             onDismiss = { showGoToChapter = false },
             onConfirm = { nextIndex ->
                 switchToChapter(nextIndex)
@@ -1840,7 +1961,17 @@ private fun EpubReaderScreen(
     BackHandler(enabled = showToc) {
         showToc = false
     }
+    BackHandler(enabled = showChapterSearch) {
+        showChapterSearch = false
+        chapterSearchQuery = ""
+    }
     KeepReaderScreenAwake(enabled = preferences.keepScreenOn)
+    VolumePageTurnEffect(
+        enabled = preferences.volumeButtonsTurnPages && !showSettings && !showGoToChapter && !showChapterSearch,
+        inverted = preferences.invertVolumeButtons,
+        onPrevious = ::goToPreviousChapter,
+        onNext = ::goToNextChapter,
+    )
     LaunchedEffect(isFullMode) {
         fullControlsVisible = false
     }
@@ -1855,7 +1986,7 @@ private fun EpubReaderScreen(
         ) {
             when {
                 chapterError != null -> ReaderMessage(message = chapterError ?: "")
-                renderedChapter == null -> LoadingState(label = "Rendering chapter")
+                renderedChapter == null -> LoadingState(label = "Rendering section")
                 else -> {
                     val chapter = renderedChapter ?: return@Box
                     key(
@@ -1890,6 +2021,13 @@ private fun EpubReaderScreen(
                             onNoteOpen = { note ->
                                 noteText = note
                             },
+                            searchQuery = chapterSearchQuery,
+                            searchRequest = chapterSearchRequest,
+                            searchBackwards = chapterSearchBackwards,
+                            onSearchResult = { current, count ->
+                                chapterSearchCurrent = current
+                                chapterSearchCount = count
+                            },
                         )
                     }
                 }
@@ -1903,9 +2041,10 @@ private fun EpubReaderScreen(
                 ) {
                     ReaderTopBar(
                         title = screen.document.title,
-                        subtitle = "Chapter ${chapterIndex + 1} of ${screen.book.chapters.size}",
+                        subtitle = topSubtitle,
                         onBack = onBack,
                         onSettings = { showSettings = true },
+                        onSearch = { showChapterSearch = !showChapterSearch },
                         onTableOfContents = { showToc = !showToc },
                         onBookmarkToggle = {
                             onToggleBookmark(
@@ -1926,7 +2065,7 @@ private fun EpubReaderScreen(
                     ReaderFooter(
                         leftLabel = "Prev",
                         rightLabel = "Next",
-                        centerLabel = "Ch ${chapterIndex + 1}",
+                        centerLabel = sectionLabel,
                         leftEnabled = chapterIndex > 0,
                         rightEnabled = chapterIndex < screen.book.chapters.lastIndex,
                         onLeft = ::goToPreviousChapter,
@@ -1945,6 +2084,32 @@ private fun EpubReaderScreen(
                     onSelect = { nextIndex ->
                         switchToChapter(nextIndex)
                         showToc = false
+                    },
+                    modifier = Modifier.align(Alignment.TopCenter),
+                )
+            }
+
+            if (showReaderChrome && showChapterSearch) {
+                ReaderChapterSearchOverlay(
+                    query = chapterSearchQuery,
+                    current = chapterSearchCurrent,
+                    count = chapterSearchCount,
+                    onQueryChange = { query ->
+                        chapterSearchQuery = query.take(80)
+                        chapterSearchCurrent = 0
+                        chapterSearchCount = 0
+                    },
+                    onPrevious = {
+                        chapterSearchBackwards = true
+                        chapterSearchRequest += 1
+                    },
+                    onNext = {
+                        chapterSearchBackwards = false
+                        chapterSearchRequest += 1
+                    },
+                    onDismiss = {
+                        showChapterSearch = false
+                        chapterSearchQuery = ""
                     },
                     modifier = Modifier.align(Alignment.TopCenter),
                 )
@@ -2111,6 +2276,13 @@ private fun PdfReaderScreen(
         pageIndex += 1
     }
 
+    VolumePageTurnEffect(
+        enabled = preferences.volumeButtonsTurnPages && !showSettings && !showGoToPage && !showToc,
+        inverted = preferences.invertVolumeButtons,
+        onPrevious = ::goToPreviousPage,
+        onNext = ::goToNextPage,
+    )
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
     ) { _ ->
@@ -2149,21 +2321,68 @@ private fun PdfReaderScreen(
                 bitmap == null -> LoadingState(label = "Rendering page")
                 else -> {
                     val pageBitmap = bitmap ?: return@BoxWithConstraints
-                    ZoomablePage(
-                        bitmap = pageBitmap,
-                        backgroundColor = MaterialTheme.colorScheme.background,
-                        initialScale = zoomScale,
-                        onScaleChange = { scale ->
-                            zoomScale = scale
-                        },
-                        onReaderTap = {
-                            if (isFullMode) {
-                                fullControlsVisible = !fullControlsVisible
-                            }
-                        },
-                        onSwipePrevious = ::goToPreviousPage,
-                        onSwipeNext = ::goToNextPage,
-                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(pageIndex, zoomScale, showSettings, showGoToPage, showToc) {
+                                if (!showSettings && !showGoToPage && !showToc && zoomScale <= 1.05f) {
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown(
+                                            requireUnconsumed = false,
+                                            pass = PointerEventPass.Initial,
+                                        )
+                                        val pointerId = down.id
+                                        var totalHorizontalDrag = 0f
+                                        var totalVerticalDrag = 0f
+                                        var multiTouch = false
+
+                                        while (true) {
+                                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                                            if (event.changes.count { change -> change.pressed } > 1) {
+                                                multiTouch = true
+                                            }
+                                            val change = event.changes.firstOrNull { it.id == pointerId }
+                                                ?: event.changes.firstOrNull()
+                                                ?: break
+                                            val movement = change.position - change.previousPosition
+                                            totalHorizontalDrag += movement.x
+                                            totalVerticalDrag += movement.y
+                                            if (change.changedToUpIgnoreConsumed()) {
+                                                break
+                                            }
+                                        }
+
+                                        val horizontalDistance = abs(totalHorizontalDrag)
+                                        val verticalDistance = abs(totalVerticalDrag)
+                                        if (
+                                            !multiTouch &&
+                                            horizontalDistance > 72f &&
+                                            horizontalDistance > verticalDistance * 1.25f
+                                        ) {
+                                            if (totalHorizontalDrag < 0f) {
+                                                goToNextPage()
+                                            } else {
+                                                goToPreviousPage()
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                    ) {
+                        ZoomablePage(
+                            bitmap = pageBitmap,
+                            backgroundColor = MaterialTheme.colorScheme.background,
+                            initialScale = zoomScale,
+                            onScaleChange = { scale ->
+                                zoomScale = scale
+                            },
+                            onReaderTap = {
+                                if (isFullMode) {
+                                    fullControlsVisible = !fullControlsVisible
+                                }
+                            },
+                        )
+                    }
                 }
             }
             if (showReaderChrome) {
@@ -2240,13 +2459,61 @@ private fun TextReaderScreen(
     var renameText by rememberSaveable(screen.document.uriString) {
         mutableStateOf(screen.document.title)
     }
-    var text by remember(screen.document.uriString) {
-        mutableStateOf(screen.initialText)
+    var noteValue by remember(screen.document.uriString) {
+        mutableStateOf(
+            TextFieldValue(
+                text = screen.initialText,
+                selection = TextRange(screen.initialText.length),
+            ),
+        )
     }
+    val undoHistory = remember(screen.document.uriString) {
+        mutableStateListOf<NoteHistoryEntry>()
+    }
+    val redoHistory = remember(screen.document.uriString) {
+        mutableStateListOf<NoteHistoryEntry>()
+    }
+    var noteHistoryOrder by remember(screen.document.uriString) {
+        mutableStateOf(0L)
+    }
+    var lastUndoCheckpointAt by remember(screen.document.uriString) {
+        mutableStateOf(0L)
+    }
+    var lastUndoCheckpointLength by remember(screen.document.uriString) {
+        mutableIntStateOf(screen.initialText.length)
+    }
+    var showNoteSearch by rememberSaveable(screen.document.uriString) {
+        mutableStateOf(false)
+    }
+    var noteSearchQuery by rememberSaveable(screen.document.uriString) {
+        mutableStateOf("")
+    }
+    var noteSearchIndex by rememberSaveable(screen.document.uriString) {
+        mutableIntStateOf(0)
+    }
+    val text = noteValue.text
     var saveOnDispose by remember(screen.document.uriString) {
         mutableStateOf(true)
     }
+    var noteEditedSinceOpen by remember(screen.document.uriString) {
+        mutableStateOf(false)
+    }
     val scrollState = rememberScrollState()
+    var editorHeightPx by remember(screen.document.uriString) {
+        mutableIntStateOf(0)
+    }
+    val noteTextLayoutRef = remember(screen.document.uriString) {
+        NoteTextLayoutRef()
+    }
+    var lastAutosaveAt by remember(screen.document.uriString) {
+        mutableStateOf(0L)
+    }
+    var lastAutosavedText by remember(screen.document.uriString) {
+        mutableStateOf(screen.initialText)
+    }
+    val cursorKeepVisiblePaddingPx = with(LocalDensity.current) {
+        72.dp.roundToPx()
+    }
     val currentScrollFraction = if (scrollState.maxValue > 0) {
         (scrollState.value.toFloat() / scrollState.maxValue.toFloat()).coerceIn(0f, 1f)
     } else {
@@ -2261,10 +2528,161 @@ private fun TextReaderScreen(
     val renderPalette = rememberReaderRenderPalette(preferences.themeMode)
     val backgroundColor = Color(AndroidColor.parseColor(renderPalette.backgroundHex))
     val textColor = Color(AndroidColor.parseColor(renderPalette.textHex))
+    val timestampBackgroundColor = Color(AndroidColor.parseColor(renderPalette.mutedHex)).copy(
+        alpha = if (preferences.themeMode == ReaderThemeMode.DARK) 0.55f else 0.35f,
+    )
+    val searchMatchBackgroundColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+    val currentSearchMatchBackgroundColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.34f)
+    val noteSearchMatches = remember(text, noteSearchQuery) {
+        findTextMatches(text, noteSearchQuery)
+    }
+    val currentSearchIndex = if (noteSearchMatches.isEmpty()) {
+        -1
+    } else {
+        noteSearchIndex.coerceIn(0, noteSearchMatches.lastIndex)
+    }
+    val currentSearchRange = noteSearchMatches.getOrNull(currentSearchIndex)
+    val enableInlineNoteStyling = text.length <= NoteInlineStyleMaxChars
+    val noteVisualTransformation: VisualTransformation = remember(
+        timestampBackgroundColor,
+        searchMatchBackgroundColor,
+        currentSearchMatchBackgroundColor,
+        noteSearchMatches,
+        currentSearchRange,
+        enableInlineNoteStyling,
+    ) {
+        if (enableInlineNoteStyling) {
+            NoteTextVisualTransformation(
+                timestampChipColor = timestampBackgroundColor,
+                searchMatchColor = searchMatchBackgroundColor,
+                currentSearchMatchColor = currentSearchMatchBackgroundColor,
+                searchMatches = noteSearchMatches,
+                currentSearchRange = currentSearchRange,
+            )
+        } else {
+            VisualTransformation.None
+        }
+    }
+
+    fun addNoteHistoryState(
+        history: MutableList<NoteHistoryEntry>,
+        value: TextFieldValue,
+    ) {
+        if (history.lastOrNull()?.value?.text == value.text) {
+            return
+        }
+        if (estimateNoteHistoryBytes(value) > NoteHistorySnapshotMaxBytes) {
+            return
+        }
+        noteHistoryOrder += 1L
+        history += NoteHistoryEntry(
+            value = value,
+            order = noteHistoryOrder,
+        )
+        trimNoteHistories(undoHistory, redoHistory)
+    }
+
+    fun shouldRecordUndoCheckpoint(
+        previousValue: TextFieldValue,
+        nextValue: TextFieldValue,
+        forceCheckpoint: Boolean,
+    ): Boolean {
+        if (forceCheckpoint || undoHistory.isEmpty()) {
+            return true
+        }
+        if (estimateNoteHistoryBytes(nextValue) > NoteHistorySnapshotMaxBytes) {
+            return false
+        }
+        val now = SystemClock.uptimeMillis()
+        val lengthDelta = abs(nextValue.text.length - lastUndoCheckpointLength)
+        val insertedText = when {
+            nextValue.text.length > previousValue.text.length -> {
+                val start = minOf(previousValue.selection.start, previousValue.selection.end)
+                    .coerceIn(0, nextValue.text.length)
+                val insertedLength = nextValue.text.length - previousValue.text.length
+                nextValue.text.substring(start, (start + insertedLength).coerceAtMost(nextValue.text.length))
+            }
+            else -> ""
+        }
+        return now - lastUndoCheckpointAt >= NoteUndoTypingCoalesceMs ||
+            lengthDelta >= NoteUndoCharacterBatch ||
+            '\n' in insertedText
+    }
+
+    fun updateNoteValue(
+        nextValue: TextFieldValue,
+        recordUndo: Boolean = true,
+        forceUndoCheckpoint: Boolean = false,
+    ) {
+        if (recordUndo && nextValue.text != noteValue.text) {
+            if (shouldRecordUndoCheckpoint(noteValue, nextValue, forceUndoCheckpoint)) {
+                addNoteHistoryState(undoHistory, noteValue)
+                lastUndoCheckpointAt = SystemClock.uptimeMillis()
+                lastUndoCheckpointLength = noteValue.text.length
+            }
+            redoHistory.clear()
+        }
+        if (nextValue.text != noteValue.text) {
+            noteEditedSinceOpen = true
+            val now = SystemClock.uptimeMillis()
+            if (
+                nextValue.text != lastAutosavedText &&
+                now - lastAutosaveAt >= NoteAutosaveMinIntervalMs &&
+                abs(nextValue.text.length - lastAutosavedText.length) >= NoteAutosaveCharacterBatch
+            ) {
+                lastAutosaveAt = now
+                lastAutosavedText = nextValue.text
+                onSaveText(nextValue.text)
+            }
+        }
+        noteValue = nextValue
+    }
+
+    fun undoNoteChange() {
+        val previousEntry = undoHistory.lastOrNull() ?: return
+        undoHistory.removeAt(undoHistory.lastIndex)
+        addNoteHistoryState(redoHistory, noteValue)
+        noteValue = previousEntry.value
+    }
+
+    fun redoNoteChange() {
+        val nextEntry = redoHistory.lastOrNull() ?: return
+        redoHistory.removeAt(redoHistory.lastIndex)
+        addNoteHistoryState(undoHistory, noteValue)
+        noteValue = nextEntry.value
+    }
+
+    fun saveDraftIfChanged(textToSave: String = latestText) {
+        if (textToSave == lastAutosavedText) {
+            return
+        }
+        lastAutosaveAt = SystemClock.uptimeMillis()
+        lastAutosavedText = textToSave
+        onSaveText(textToSave)
+    }
+
+    fun selectNoteSearchMatch(index: Int) {
+        if (noteSearchMatches.isEmpty()) {
+            return
+        }
+        val safeIndex = ((index % noteSearchMatches.size) + noteSearchMatches.size) % noteSearchMatches.size
+        val range = noteSearchMatches[safeIndex]
+        noteSearchIndex = safeIndex
+        updateNoteValue(
+            nextValue = noteValue.copy(selection = TextRange(range.first, range.last + 1)),
+            recordUndo = false,
+        )
+    }
+
+    fun closeNoteSearch() {
+        showNoteSearch = false
+        noteSearchQuery = ""
+        noteSearchIndex = 0
+    }
 
     fun saveAndLeave() {
         saveOnDispose = false
-        onSaveText(latestText)
+        saveDraftIfChanged(latestText)
         onSaveProgress(currentScrollFraction)
         onBack()
     }
@@ -2274,6 +2692,32 @@ private fun TextReaderScreen(
         onDiscardText()
     }
 
+    fun insertTimestamp() {
+        val timestamp = LocalDateTime.now().format(
+            DateTimeFormatter.ofPattern("yyyy-MM-dd | hh:mm a :", Locale.US),
+        )
+        val selectionStart = minOf(noteValue.selection.start, noteValue.selection.end)
+            .coerceIn(0, noteValue.text.length)
+        val selectionEnd = maxOf(noteValue.selection.start, noteValue.selection.end)
+            .coerceIn(0, noteValue.text.length)
+        val prefix = if (selectionStart > 0 && noteValue.text.getOrNull(selectionStart - 1) != '\n') "\n" else ""
+        val suffix = if (selectionEnd < noteValue.text.length && noteValue.text.getOrNull(selectionEnd) != '\n') "\n" else ""
+        val insertion = "$prefix$timestamp $suffix"
+        val nextText = buildString {
+            append(noteValue.text.substring(0, selectionStart))
+            append(insertion)
+            append(noteValue.text.substring(selectionEnd))
+        }
+        val cursor = selectionStart + insertion.length
+        updateNoteValue(
+            nextValue = TextFieldValue(
+                text = nextText,
+                selection = TextRange(cursor),
+            ),
+            forceUndoCheckpoint = true,
+        )
+    }
+
     BackHandler {
         saveAndLeave()
     }
@@ -2281,7 +2725,7 @@ private fun TextReaderScreen(
     DisposableEffect(screen.document.uriString) {
         onDispose {
             if (shouldSaveOnDispose) {
-                onSaveText(latestText)
+                saveDraftIfChanged(latestText)
                 onSaveProgress(latestScrollFraction)
             }
         }
@@ -2290,6 +2734,55 @@ private fun TextReaderScreen(
     LaunchedEffect(screen.document.uriString, screen.initialScrollFraction, scrollState.maxValue) {
         if (screen.initialScrollFraction > 0f && scrollState.maxValue > 0) {
             scrollState.scrollTo((scrollState.maxValue * screen.initialScrollFraction.coerceIn(0f, 1f)).roundToInt())
+        }
+    }
+    LaunchedEffect(showNoteSearch, noteSearchQuery, noteSearchMatches.size) {
+        noteSearchIndex = if (showNoteSearch && noteSearchQuery.isNotBlank() && noteSearchMatches.isNotEmpty()) {
+            noteSearchIndex.coerceIn(0, noteSearchMatches.lastIndex)
+        } else {
+            0
+        }
+    }
+    LaunchedEffect(text, noteEditedSinceOpen) {
+        if (noteEditedSinceOpen && text != lastAutosavedText) {
+            delay(NoteAutosaveDebounceMs)
+            saveDraftIfChanged(text)
+        }
+    }
+    LaunchedEffect(
+        noteValue.text.length,
+        noteValue.selection.start,
+        noteValue.selection.end,
+        editorHeightPx,
+        scrollState.maxValue,
+        noteEditedSinceOpen,
+    ) {
+        val layout = noteTextLayoutRef.value ?: return@LaunchedEffect
+        if (!noteEditedSinceOpen || editorHeightPx <= 0 || scrollState.maxValue <= 0) {
+            return@LaunchedEffect
+        }
+
+        val cursor = maxOf(noteValue.selection.start, noteValue.selection.end)
+            .coerceIn(0, noteValue.text.length)
+        val cursorRect = layout.getCursorRect(cursor)
+        val visibleTop = scrollState.value + cursorKeepVisiblePaddingPx
+        val visibleBottom = scrollState.value + editorHeightPx - cursorKeepVisiblePaddingPx
+        val nextScroll = when {
+            cursorRect.bottom > visibleBottom -> {
+                (cursorRect.bottom - editorHeightPx + cursorKeepVisiblePaddingPx)
+                    .roundToInt()
+                    .coerceIn(0, scrollState.maxValue)
+            }
+            cursorRect.top < visibleTop -> {
+                (cursorRect.top - cursorKeepVisiblePaddingPx)
+                    .roundToInt()
+                    .coerceIn(0, scrollState.maxValue)
+            }
+            else -> null
+        }
+
+        if (nextScroll != null && nextScroll != scrollState.value) {
+            scrollState.scrollTo(nextScroll)
         }
     }
 
@@ -2315,72 +2808,106 @@ private fun TextReaderScreen(
     }
     KeepReaderScreenAwake(enabled = preferences.keepScreenOn)
 
-    Scaffold(
-        containerColor = backgroundColor,
-        topBar = {
-            TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = backgroundColor,
-                    titleContentColor = textColor,
-                ),
-                navigationIcon = {
-                    TextButton(onClick = ::discardAndLeave) {
-                        Text(text = "Discard")
-                    }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundColor),
+    ) {
+        TopAppBar(
+            colors = TopAppBarDefaults.topAppBarColors(
+                containerColor = backgroundColor,
+                titleContentColor = textColor,
+            ),
+            navigationIcon = {
+                TextButton(onClick = ::discardAndLeave) {
+                    Text(text = "Discard")
+                }
+            },
+            title = {
+                Column {
+                    Text(
+                        text = screen.document.title,
+                        modifier = Modifier.clickable {
+                            renameText = screen.document.title
+                            showRename = true
+                        },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = "TXT",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            actions = {
+                IconButton(onClick = { showNoteSearch = true }) {
+                    Icon(
+                        imageVector = Icons.Outlined.Search,
+                        contentDescription = "Search note",
+                        tint = textColor,
+                    )
+                }
+                TextButton(onClick = ::saveAndLeave) {
+                    Text(text = "Save")
+                }
+                IconButton(onClick = { onToggleBookmark(currentScrollFraction) }) {
+                    Icon(
+                        imageVector = if (currentBookmarked) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder,
+                        contentDescription = if (currentBookmarked) "Remove bookmark" else "Add bookmark",
+                        tint = if (currentBookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                IconButton(onClick = { showSettings = true }) {
+                    Icon(
+                        imageVector = Icons.Outlined.Settings,
+                        contentDescription = "Settings",
+                    )
+                }
+            },
+        )
+        if (showNoteSearch) {
+            NoteEditorSearchBar(
+                query = noteSearchQuery,
+                matchLabel = when {
+                    noteSearchQuery.isBlank() -> ""
+                    noteSearchMatches.isEmpty() -> "0 / 0"
+                    else -> "${currentSearchIndex + 1} / ${noteSearchMatches.size}"
                 },
-                title = {
-                    Column {
-                        Text(
-                            text = screen.document.title,
-                            modifier = Modifier.clickable {
-                                renameText = screen.document.title
-                                showRename = true
-                            },
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            text = "TXT",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                hasMatches = noteSearchMatches.isNotEmpty(),
+                backgroundColor = backgroundColor,
+                textColor = textColor,
+                onQueryChange = { query ->
+                    noteSearchQuery = query
+                    noteSearchIndex = 0
                 },
-                actions = {
-                    TextButton(onClick = ::saveAndLeave) {
-                        Text(text = "Save")
-                    }
-                    IconButton(onClick = { onToggleBookmark(currentScrollFraction) }) {
-                        Icon(
-                            imageVector = if (currentBookmarked) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder,
-                            contentDescription = if (currentBookmarked) "Remove bookmark" else "Add bookmark",
-                            tint = if (currentBookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                        )
-                    }
-                    IconButton(onClick = { showSettings = true }) {
-                        Icon(
-                            imageVector = Icons.Outlined.Settings,
-                            contentDescription = "Settings",
-                        )
-                    }
+                onPrevious = {
+                    selectNoteSearchMatch(if (currentSearchIndex < 0) 0 else currentSearchIndex - 1)
                 },
+                onNext = {
+                    selectNoteSearchMatch(if (currentSearchIndex < 0) 0 else currentSearchIndex + 1)
+                },
+                onClose = ::closeNoteSearch,
             )
-        },
-    ) { paddingValues ->
+        }
         Box(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .background(backgroundColor)
+                .weight(1f)
+                .fillMaxWidth()
                 .padding(horizontal = 22.dp, vertical = 18.dp),
         ) {
             BasicTextField(
-                value = text,
-                onValueChange = { nextText ->
-                    text = nextText
+                value = noteValue,
+                onValueChange = { nextValue ->
+                    updateNoteValue(nextValue)
+                },
+                onTextLayout = { layoutResult ->
+                    noteTextLayoutRef.value = layoutResult
                 },
                 modifier = Modifier
                     .fillMaxSize()
+                    .onSizeChanged { size -> editorHeightPx = size.height }
                     .verticalScroll(scrollState),
                 textStyle = MaterialTheme.typography.bodyLarge.copy(
                     color = textColor,
@@ -2388,6 +2915,7 @@ private fun TextReaderScreen(
                     fontSize = preferences.fontSizeSp.sp,
                     lineHeight = (preferences.fontSizeSp * preferences.lineSpacing.coerceIn(1.2f, 2.4f)).sp,
                 ),
+                visualTransformation = noteVisualTransformation,
             )
             if (text.isBlank()) {
                 Text(
@@ -2401,8 +2929,351 @@ private fun TextReaderScreen(
                 )
             }
         }
+        NoteEditorHelperBar(
+            backgroundColor = backgroundColor,
+            iconColor = textColor,
+            canUndo = undoHistory.isNotEmpty(),
+            canRedo = redoHistory.isNotEmpty(),
+            onUndo = ::undoNoteChange,
+            onRedo = ::redoNoteChange,
+            onInsertTimestamp = ::insertTimestamp,
+        )
     }
 }
+
+@Composable
+private fun NoteEditorSearchBar(
+    query: String,
+    matchLabel: String,
+    hasMatches: Boolean,
+    backgroundColor: Color,
+    textColor: Color,
+    onQueryChange: (String) -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onClose: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RectangleShape,
+        color = backgroundColor,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = textColor),
+                placeholder = {
+                    Text(text = "Search note")
+                },
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 48.dp),
+            )
+            if (matchLabel.isNotBlank()) {
+                Text(
+                    text = matchLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = textColor.copy(alpha = 0.68f),
+                )
+            }
+            IconButton(
+                enabled = hasMatches,
+                onClick = onPrevious,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.KeyboardArrowUp,
+                    contentDescription = "Previous match",
+                    tint = if (hasMatches) textColor else textColor.copy(alpha = 0.28f),
+                )
+            }
+            IconButton(
+                enabled = hasMatches,
+                onClick = onNext,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.KeyboardArrowDown,
+                    contentDescription = "Next match",
+                    tint = if (hasMatches) textColor else textColor.copy(alpha = 0.28f),
+                )
+            }
+            IconButton(onClick = onClose) {
+                Icon(
+                    imageVector = Icons.Outlined.Close,
+                    contentDescription = "Close search",
+                    tint = textColor,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NoteEditorHelperBar(
+    backgroundColor: Color,
+    iconColor: Color,
+    canUndo: Boolean,
+    canRedo: Boolean,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
+    onInsertTimestamp: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RectangleShape,
+        color = backgroundColor,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .imePadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 10.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    enabled = canUndo,
+                    onClick = onUndo,
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Undo,
+                        contentDescription = "Undo",
+                        tint = if (canUndo) iconColor else iconColor.copy(alpha = 0.28f),
+                    )
+                }
+                IconButton(
+                    enabled = canRedo,
+                    onClick = onRedo,
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Redo,
+                        contentDescription = "Redo",
+                        tint = if (canRedo) iconColor else iconColor.copy(alpha = 0.28f),
+                    )
+                }
+            }
+            IconButton(onClick = onInsertTimestamp) {
+                Icon(
+                    imageVector = Icons.Outlined.AccessTime,
+                    contentDescription = "Insert timestamp",
+                    tint = iconColor,
+                )
+            }
+        }
+    }
+}
+
+private const val NoteHistoryMaxDepth = 20
+private const val NoteHistoryMemoryLimitBytes = 512 * 1024
+private const val NoteHistorySnapshotMaxBytes = 128 * 1024
+private const val NoteUndoTypingCoalesceMs = 1_200L
+private const val NoteUndoCharacterBatch = 512
+private const val NoteAutosaveMinIntervalMs = 1_200L
+private const val NoteAutosaveDebounceMs = 700L
+private const val NoteAutosaveCharacterBatch = 256
+private const val NoteTimestampMaxPrefixLength = 48
+private const val NoteInlineStyleMaxChars = 8_000
+
+private class NoteTextLayoutRef {
+    var value: TextLayoutResult? = null
+}
+
+private data class NoteHistoryEntry(
+    val value: TextFieldValue,
+    val order: Long,
+)
+
+private fun estimateNoteHistoryBytes(value: TextFieldValue): Int {
+    return value.text.length * 2 + 64
+}
+
+private fun trimNoteHistories(
+    undoHistory: MutableList<NoteHistoryEntry>,
+    redoHistory: MutableList<NoteHistoryEntry>,
+) {
+    while (undoHistory.size > NoteHistoryMaxDepth) {
+        undoHistory.removeAt(0)
+    }
+    while (redoHistory.size > NoteHistoryMaxDepth) {
+        redoHistory.removeAt(0)
+    }
+
+    while (noteHistoryBytes(undoHistory) + noteHistoryBytes(redoHistory) > NoteHistoryMemoryLimitBytes) {
+        val oldestUndo = undoHistory.firstOrNull()
+        val oldestRedo = redoHistory.firstOrNull()
+        when {
+            oldestUndo == null && oldestRedo == null -> return
+            oldestRedo == null -> undoHistory.removeAt(0)
+            oldestUndo == null -> redoHistory.removeAt(0)
+            oldestUndo.order <= oldestRedo.order -> undoHistory.removeAt(0)
+            else -> redoHistory.removeAt(0)
+        }
+    }
+}
+
+private fun noteHistoryBytes(history: List<NoteHistoryEntry>): Int {
+    return history.sumOf { entry -> estimateNoteHistoryBytes(entry.value) }
+}
+
+private class NoteTextVisualTransformation(
+    private val timestampChipColor: Color,
+    private val searchMatchColor: Color,
+    private val currentSearchMatchColor: Color,
+    private val searchMatches: List<IntRange>,
+    private val currentSearchRange: IntRange?,
+) : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText {
+        val builder = AnnotatedString.Builder()
+        builder.append(text.text)
+        text.spanStyles.forEach { style ->
+            builder.addStyle(style.item, style.start, style.end)
+        }
+        text.paragraphStyles.forEach { style ->
+            builder.addStyle(style.item, style.start, style.end)
+        }
+        findTimestampPrefixRanges(text.text).forEach { range ->
+            builder.addStyle(
+                style = SpanStyle(background = timestampChipColor),
+                start = range.first,
+                end = range.last + 1,
+            )
+        }
+        searchMatches
+            .filter { range -> range.first >= 0 && range.last < text.text.length }
+            .forEach { range ->
+                builder.addStyle(
+                    style = SpanStyle(background = searchMatchColor),
+                    start = range.first,
+                    end = range.last + 1,
+                )
+            }
+        currentSearchRange
+            ?.takeIf { range -> range.first >= 0 && range.last < text.text.length }
+            ?.let { range ->
+                builder.addStyle(
+                    style = SpanStyle(background = currentSearchMatchColor),
+                    start = range.first,
+                    end = range.last + 1,
+                )
+            }
+        return TransformedText(builder.toAnnotatedString(), OffsetMapping.Identity)
+    }
+}
+
+private fun findTimestampPrefixRanges(text: String): List<IntRange> {
+    if ('|' !in text || text.length < 12) {
+        return emptyList()
+    }
+
+    val ranges = mutableListOf<IntRange>()
+    var lineStart = 0
+    while (lineStart <= text.length) {
+        val lineEnd = text.indexOf('\n', lineStart).let { index ->
+            if (index < 0) text.length else index
+        }
+        timestampPrefixLength(text, lineStart, lineEnd)?.let { length ->
+            if (length > 0) {
+                ranges += lineStart until (lineStart + length)
+            }
+        }
+        if (lineEnd >= text.length) {
+            break
+        }
+        lineStart = lineEnd + 1
+    }
+    return ranges
+}
+
+private fun timestampPrefixLength(
+    text: String,
+    lineStart: Int,
+    lineEnd: Int,
+): Int? {
+    if (lineEnd - lineStart < 12) {
+        return null
+    }
+    fun charAt(offset: Int): Char = text[lineStart + offset]
+    fun isDigitAt(offset: Int): Boolean = charAt(offset).isDigit()
+    val dateLooksRight = isDigitAt(0) &&
+        isDigitAt(1) &&
+        isDigitAt(2) &&
+        isDigitAt(3) &&
+        charAt(4) == '-' &&
+        isDigitAt(5) &&
+        isDigitAt(6) &&
+        charAt(7) == '-' &&
+        isDigitAt(8) &&
+        isDigitAt(9)
+    if (!dateLooksRight) {
+        return null
+    }
+
+    var cursor = lineStart + 10
+    while (cursor < lineEnd && text[cursor].isWhitespace() && text[cursor] != '\n') {
+        cursor += 1
+    }
+    if (cursor >= lineEnd || text[cursor] != '|') {
+        return null
+    }
+
+    val maxEnd = minOf(lineEnd, lineStart + NoteTimestampMaxPrefixLength)
+    val afterPipe = (cursor + 1).coerceAtMost(maxEnd)
+    val colonSpace = text.indexOf(": ", startIndex = afterPipe).takeIf { index ->
+        index >= afterPipe && index + 1 < maxEnd
+    }
+    if (colonSpace != null) {
+        return (colonSpace + 2 - lineStart).coerceAtMost(NoteTimestampMaxPrefixLength)
+    }
+
+    val lastColon = text.lastIndexOf(':', startIndex = maxEnd - 1).takeIf { index ->
+        index >= afterPipe
+    }
+    if (lastColon != null) {
+        return (lastColon + 1 - lineStart).coerceAtMost(NoteTimestampMaxPrefixLength)
+    }
+
+    val naturalStop = generateSequence(afterPipe) { index ->
+        (index + 1).takeIf { it < maxEnd }
+    }.firstOrNull { index ->
+        text[index].isWhitespace() && index > afterPipe && text.getOrNull(index - 1)?.isLetter() == true
+    }
+    return ((naturalStop ?: maxEnd) - lineStart)
+        .coerceIn(0, NoteTimestampMaxPrefixLength)
+}
+
+private fun findTextMatches(
+    text: String,
+    query: String,
+): List<IntRange> {
+    if (query.isBlank() || text.isEmpty()) {
+        return emptyList()
+    }
+    val matches = mutableListOf<IntRange>()
+    var startIndex = 0
+    while (startIndex <= text.length - query.length) {
+        val nextIndex = text.indexOf(query, startIndex, ignoreCase = true)
+        if (nextIndex < 0) {
+            break
+        }
+        matches += nextIndex..(nextIndex + query.length - 1)
+        startIndex = nextIndex + query.length.coerceAtLeast(1)
+    }
+    return matches
+}
+
 @Composable
 private fun EpubWebView(
     chapter: RenderedChapter,
@@ -2417,6 +3288,10 @@ private fun EpubWebView(
     onSwipeNext: () -> Unit,
     onOpenLocalHref: (String) -> Boolean,
     onNoteOpen: (String) -> Unit,
+    searchQuery: String,
+    searchRequest: Int,
+    searchBackwards: Boolean,
+    onSearchResult: (current: Int, count: Int) -> Unit,
 ) {
     val backgroundColor = AndroidColor.parseColor(renderPalette.backgroundHex)
     AndroidView(
@@ -2435,17 +3310,36 @@ private fun EpubWebView(
                 settings.blockNetworkLoads = true
                 settings.allowFileAccess = true
                 settings.allowContentAccess = true
+                @Suppress("DEPRECATION")
+                settings.allowFileAccessFromFileURLs = true
+                @Suppress("DEPRECATION")
+                settings.allowUniversalAccessFromFileURLs = false
                 settings.loadWithOverviewMode = true
                 settings.useWideViewPort = true
                 settings.builtInZoomControls = true
                 settings.displayZoomControls = false
                 settings.setSupportZoom(true)
                 addJavascriptInterface(NoteBridge(openNote), "AreadaNote")
+                setFindListener { activeMatchOrdinal, numberOfMatches, isDoneCounting ->
+                    if (isDoneCounting) {
+                        onSearchResult(
+                            if (numberOfMatches > 0) activeMatchOrdinal + 1 else 0,
+                            numberOfMatches,
+                        )
+                    }
+                }
 
                 webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView, url: String?) {
                         restoreWebViewScroll(view, initialScrollFraction)
                         injectNoteHandler(view)
+                        applyEpubChapterSearch(
+                            webView = view,
+                            query = searchQuery,
+                            request = searchRequest,
+                            backwards = searchBackwards,
+                            onSearchResult = onSearchResult,
+                        )
                     }
 
                     override fun shouldOverrideUrlLoading(
@@ -2559,8 +3453,18 @@ private fun EpubWebView(
                 )
             }
         },
+        update = { webView ->
+            applyEpubChapterSearch(
+                webView = webView,
+                query = searchQuery,
+                request = searchRequest,
+                backwards = searchBackwards,
+                onSearchResult = onSearchResult,
+            )
+        },
         onRelease = { webView ->
             webView.stopLoading()
+            webView.setFindListener(null)
             webView.setOnTouchListener(null)
             webView.setOnScrollChangeListener(null)
             webView.webViewClient = WebViewClient()
@@ -2571,6 +3475,39 @@ private fun EpubWebView(
     )
 }
 
+private data class EpubSearchViewState(
+    val query: String,
+    val request: Int,
+)
+
+private fun applyEpubChapterSearch(
+    webView: WebView,
+    query: String,
+    request: Int,
+    backwards: Boolean,
+    onSearchResult: (current: Int, count: Int) -> Unit,
+) {
+    val cleanQuery = query.trim()
+    val previous = webView.getTag(R.id.tag_epub_search_state) as? EpubSearchViewState
+
+    if (cleanQuery.isBlank()) {
+        if (previous?.query?.isNotBlank() == true) {
+            webView.clearMatches()
+            onSearchResult(0, 0)
+        }
+        webView.setTag(R.id.tag_epub_search_state, EpubSearchViewState("", request))
+        return
+    }
+
+    if (previous?.query != cleanQuery) {
+        webView.findAllAsync(cleanQuery)
+    } else if (previous.request != request) {
+        webView.findNext(backwards)
+    }
+
+    webView.setTag(R.id.tag_epub_search_state, EpubSearchViewState(cleanQuery, request))
+}
+
 @Composable
 private fun ZoomablePage(
     bitmap: Bitmap,
@@ -2578,8 +3515,6 @@ private fun ZoomablePage(
     initialScale: Float,
     onScaleChange: (Float) -> Unit,
     onReaderTap: () -> Unit,
-    onSwipePrevious: () -> Unit,
-    onSwipeNext: () -> Unit,
 ) {
     var scale by rememberSaveable(bitmap.generationId, initialScale) {
         mutableFloatStateOf(initialScale.coerceIn(1f, 5f))
@@ -2621,29 +3556,6 @@ private fun ZoomablePage(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(bitmap.generationId, scale) {
-                    if (scale <= 1.05f) {
-                        var totalDrag = 0f
-                        detectHorizontalDragGestures(
-                            onDragStart = {
-                                totalDrag = 0f
-                            },
-                            onHorizontalDrag = { _, dragAmount ->
-                                totalDrag += dragAmount
-                            },
-                            onDragEnd = {
-                                when {
-                                    totalDrag < -90f -> onSwipeNext()
-                                    totalDrag > 90f -> onSwipePrevious()
-                                }
-                                totalDrag = 0f
-                            },
-                            onDragCancel = {
-                                totalDrag = 0f
-                            },
-                        )
-                    }
-                }
                 .pointerInput(bitmap.generationId) {
                     detectTapGestures(
                         onTap = {
@@ -2692,6 +3604,7 @@ private fun ReaderSettingsSheet(
     var lineSpacingDraft by rememberSaveable {
         mutableFloatStateOf(preferences.lineSpacing)
     }
+    val maxSheetHeight = (LocalConfiguration.current.screenHeightDp.dp * 0.5f).coerceAtLeast(260.dp)
 
     LaunchedEffect(preferences.fontSizeSp) {
         fontSizeDraft = preferences.fontSizeSp.toFloat()
@@ -2708,6 +3621,7 @@ private fun ReaderSettingsSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(max = maxSheetHeight)
                 .verticalScroll(rememberScrollState())
                 .navigationBarsPadding()
                 .padding(horizontal = 24.dp, vertical = 8.dp),
@@ -2838,27 +3752,28 @@ private fun ReaderSettingsSheet(
                     style = MaterialTheme.typography.titleSmall,
                 )
                 Spacer(modifier = Modifier.height(10.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    SettingChip(
-                        label = "Follow system",
-                        selected = !preferences.keepScreenOn,
-                        onClick = {
-                            onPreferencesChange(preferences.copy(keepScreenOn = false))
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                    SettingChip(
-                        label = "Always ON",
-                        selected = preferences.keepScreenOn,
-                        onClick = {
-                            onPreferencesChange(preferences.copy(keepScreenOn = true))
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
+                SettingToggleRow(
+                    label = "Keep screen on",
+                    checked = preferences.keepScreenOn,
+                    onCheckedChange = { checked ->
+                        onPreferencesChange(preferences.copy(keepScreenOn = checked))
+                    },
+                )
+                SettingToggleRow(
+                    label = "Volume buttons turn pages",
+                    checked = preferences.volumeButtonsTurnPages,
+                    onCheckedChange = { checked ->
+                        onPreferencesChange(preferences.copy(volumeButtonsTurnPages = checked))
+                    },
+                )
+                SettingToggleRow(
+                    label = "Invert volume buttons",
+                    checked = preferences.invertVolumeButtons,
+                    enabled = preferences.volumeButtonsTurnPages,
+                    onCheckedChange = { checked ->
+                        onPreferencesChange(preferences.copy(invertVolumeButtons = checked))
+                    },
+                )
             }
             Spacer(modifier = Modifier.height(12.dp))
         }
@@ -2869,6 +3784,77 @@ private data class ReaderTocEntry(
     val index: Int,
     val label: String,
 )
+
+@Composable
+private fun ReaderChapterSearchOverlay(
+    query: String,
+    current: Int,
+    count: Int,
+    onQueryChange: (String) -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = 92.dp, start = 16.dp, end = 16.dp),
+        shape = RectangleShape,
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            BasicTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+                textStyle = MaterialTheme.typography.bodyMedium.copy(
+                    color = MaterialTheme.colorScheme.onSurface,
+                ),
+                decorationBox = { innerTextField ->
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .padding(horizontal = 10.dp, vertical = 9.dp),
+                    ) {
+                        if (query.isBlank()) {
+                            Text(
+                                text = "Search chapter",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        innerTextField()
+                    }
+                },
+            )
+            Text(
+                text = if (query.isBlank()) "0 / 0" else "$current / $count",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(onClick = onPrevious, enabled = count > 0) {
+                Text(text = "Prev")
+            }
+            TextButton(onClick = onNext, enabled = count > 0) {
+                Text(text = "Next")
+            }
+            TextButton(onClick = onDismiss) {
+                Text(text = "Close")
+            }
+        }
+    }
+}
 
 @Composable
 private fun ReaderTocOverlay(
@@ -2961,6 +3947,7 @@ private fun ReaderTopBar(
     subtitle: String,
     onBack: () -> Unit,
     onSettings: (() -> Unit)?,
+    onSearch: (() -> Unit)? = null,
     onTableOfContents: (() -> Unit)? = null,
     onBookmarkToggle: (() -> Unit)? = null,
     isBookmarked: Boolean = false,
@@ -2990,6 +3977,14 @@ private fun ReaderTopBar(
             }
         },
         actions = {
+            onSearch?.let { openSearch ->
+                IconButton(onClick = openSearch) {
+                    Icon(
+                        imageVector = Icons.Outlined.Search,
+                        contentDescription = "Search current chapter",
+                    )
+                }
+            }
             onTableOfContents?.let { openToc ->
                 IconButton(onClick = openToc) {
                     Icon(
@@ -3300,6 +4295,40 @@ private fun SettingChip(
             textAlign = TextAlign.Center,
             style = MaterialTheme.typography.bodyMedium,
             color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun SettingToggleRow(
+    label: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    val contentAlpha = if (enabled) 1f else 0.45f
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled) { onCheckedChange(!checked) }
+            .padding(vertical = 9.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = contentAlpha),
+        )
+        Text(
+            text = if (checked) "ON" else "OFF",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = if (checked && enabled) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = contentAlpha)
+            },
         )
     }
 }

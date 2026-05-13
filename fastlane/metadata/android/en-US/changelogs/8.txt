@@ -1,0 +1,8 @@
+Improved notes with search, timestamp insert, undo/redo, and editor stability fixes.
+Improved EPUB title/ToC handling, current-section search, and stable section navigation.
+Fixed EPUB rendering/resource loading issues and protected active reader cache.
+Improved folder navigation performance and new note opening.
+Fixed external file task reuse, PDF swipe navigation, and PDF render scaling.
+Improved reader settings, volume-button page turning, and compact prompts.
+Improved dark splash, themed icon, and F-Droid icon metadata.
+Preserved offline-first behavior with no internet permission.

@@ -12,6 +12,10 @@ object LibraryRepository {
     private const val MAX_SEARCH_INDEX_ITEMS = 20_000
     private const val MAX_SEARCH_VISITED = 50_000
     private const val MAX_SEARCH_DEPTH = 18
+    private const val MAX_NOTE_SEARCH_CHARS = 24_000
+    private const val MAX_FOLDER_DOCUMENT_ID_CACHE = 512
+    private val folderDocumentIdCacheLock = Any()
+    private val folderDocumentIdCache = linkedMapOf<String, String>()
 
     fun resolveRoot(
         context: Context,
@@ -27,6 +31,26 @@ object LibraryRepository {
     }
 
     fun loadFolder(
+        context: Context,
+        root: LibraryRoot,
+        relativePath: String,
+    ): LibraryFolderState =
+        loadFolderFast(context, root, relativePath) ?: loadFolderWithDocumentFile(context, root, relativePath)
+
+    fun clearFolderNavigationCache(rootUriString: String? = null) {
+        synchronized(folderDocumentIdCacheLock) {
+            if (rootUriString == null) {
+                folderDocumentIdCache.clear()
+                return@synchronized
+            }
+
+            val keysToRemove = folderDocumentIdCache.keys
+                .filter { key -> key.startsWith("$rootUriString::") }
+            keysToRemove.forEach { key -> folderDocumentIdCache.remove(key) }
+        }
+    }
+
+    private fun loadFolderWithDocumentFile(
         context: Context,
         root: LibraryRoot,
         relativePath: String,
@@ -90,6 +114,80 @@ object LibraryRepository {
             books = books,
         )
     }
+
+    private fun loadFolderFast(
+        context: Context,
+        root: LibraryRoot,
+        relativePath: String,
+    ): LibraryFolderState? =
+        runCatching {
+            val rootUri = Uri.parse(root.treeUriString)
+            val targetDocumentId = resolveFolderDocumentId(
+                context = context,
+                rootUri = rootUri,
+                root = root,
+                relativePath = relativePath,
+            ) ?: return@runCatching null
+
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(rootUri, targetDocumentId)
+            val projection = arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+            )
+            val folders = mutableListOf<LibraryFolderEntry>()
+            val books = mutableListOf<LibraryBookEntry>()
+
+            context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                val documentIdIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mimeTypeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                if (documentIdIndex < 0 || nameIndex < 0 || mimeTypeIndex < 0) {
+                    return@runCatching null
+                }
+
+                while (cursor.moveToNext()) {
+                    val documentId = cursor.getString(documentIdIndex).orEmpty()
+                    val name = cursor.getString(nameIndex)?.trim().orEmpty()
+                    val mimeType = cursor.getString(mimeTypeIndex).orEmpty()
+                    if (documentId.isBlank() || name.isBlank()) {
+                        continue
+                    }
+
+                    val documentUriString = DocumentsContract
+                        .buildDocumentUriUsingTree(rootUri, documentId)
+                        .toString()
+                    if (mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
+                        val folderPath = if (relativePath.isBlank()) name else "$relativePath/$name"
+                        cacheFolderDocumentId(root, folderPath, documentId)
+                        folders += LibraryFolderEntry(
+                            id = folderId(root, folderPath),
+                            relativePath = folderPath,
+                            name = name,
+                        )
+                        continue
+                    }
+
+                    val type = supportedTypeFromName(name) ?: continue
+                    books += LibraryBookEntry(
+                        id = documentUriString,
+                        uriString = documentUriString,
+                        fileName = name,
+                        title = name.substringBeforeLast('.', name).ifBlank { name },
+                        type = type,
+                    )
+                }
+            } ?: return@runCatching null
+
+            cacheFolderDocumentId(root, relativePath, targetDocumentId)
+            LibraryFolderState(
+                root = root,
+                currentRelativePath = relativePath,
+                pathSegments = buildPathSegments(root, relativePath),
+                folders = folders.sortedWith(NaturalSort.comparator { it.name }),
+                books = books.sortedWith(NaturalSort.comparator { it.title }),
+            )
+        }.getOrNull()
 
     fun deleteFolder(
         context: Context,
@@ -272,6 +370,7 @@ object LibraryRepository {
                 )
             }
             searchFolder(
+                context = context,
                 root = root,
                 folder = rootFolder,
                 relativePath = "",
@@ -340,12 +439,18 @@ object LibraryRepository {
                     }
 
                     val documentType = supportedTypeFromName(name) ?: continue
+                    val noteContent = if (documentType == DocumentType.TXT) {
+                        noteSearchText(context, child.uri)
+                    } else {
+                        ""
+                    }
                     index += bookSearchIndexEntry(
                         root = root,
                         relativePath = childRelativePath,
                         name = name,
                         documentType = documentType,
                         uriString = child.uri.toString(),
+                        noteContent = noteContent,
                     )
                 }
             }
@@ -401,6 +506,116 @@ object LibraryRepository {
         return segments
     }
 
+    private fun resolveFolderDocumentId(
+        context: Context,
+        rootUri: Uri,
+        root: LibraryRoot,
+        relativePath: String,
+    ): String? {
+        cachedFolderDocumentId(root, relativePath)?.let { documentId -> return documentId }
+
+        val rootDocumentId = runCatching { DocumentsContract.getTreeDocumentId(rootUri) }
+            .getOrNull()
+            ?: return null
+        cacheFolderDocumentId(root, "", rootDocumentId)
+        if (relativePath.isBlank()) {
+            return rootDocumentId
+        }
+
+        var currentDocumentId = rootDocumentId
+        var runningPath = ""
+        relativePath.split('/')
+            .filter { segment -> segment.isNotBlank() }
+            .forEach { segment ->
+                runningPath = if (runningPath.isBlank()) segment else "$runningPath/$segment"
+                val cached = cachedFolderDocumentId(root, runningPath)
+                if (cached != null) {
+                    currentDocumentId = cached
+                    return@forEach
+                }
+
+                currentDocumentId = findChildFolderDocumentId(
+                    context = context,
+                    rootUri = rootUri,
+                    parentDocumentId = currentDocumentId,
+                    folderName = segment,
+                ) ?: return null
+                cacheFolderDocumentId(root, runningPath, currentDocumentId)
+            }
+
+        return currentDocumentId
+    }
+
+    private fun findChildFolderDocumentId(
+        context: Context,
+        rootUri: Uri,
+        parentDocumentId: String,
+        folderName: String,
+    ): String? {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(rootUri, parentDocumentId)
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+        )
+
+        return runCatching {
+            context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                val documentIdIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mimeTypeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                if (documentIdIndex < 0 || nameIndex < 0 || mimeTypeIndex < 0) {
+                    return@use null
+                }
+
+                while (cursor.moveToNext()) {
+                    val name = cursor.getString(nameIndex)?.trim().orEmpty()
+                    val mimeType = cursor.getString(mimeTypeIndex).orEmpty()
+                    if (name == folderName && mimeType == DocumentsContract.Document.MIME_TYPE_DIR) {
+                        return@use cursor.getString(documentIdIndex).orEmpty().ifBlank { null }
+                    }
+                }
+
+                null
+            }
+        }.getOrNull()
+    }
+
+    private fun folderDocumentIdCacheKey(
+        root: LibraryRoot,
+        relativePath: String,
+    ): String = "${root.treeUriString}::$relativePath"
+
+    private fun cachedFolderDocumentId(
+        root: LibraryRoot,
+        relativePath: String,
+    ): String? =
+        synchronized(folderDocumentIdCacheLock) {
+            val key = folderDocumentIdCacheKey(root, relativePath)
+            val cached = folderDocumentIdCache.remove(key)
+            if (cached != null) {
+                folderDocumentIdCache[key] = cached
+            }
+            cached
+        }
+
+    private fun cacheFolderDocumentId(
+        root: LibraryRoot,
+        relativePath: String,
+        documentId: String,
+    ) {
+        if (documentId.isBlank()) {
+            return
+        }
+        synchronized(folderDocumentIdCacheLock) {
+            folderDocumentIdCache[folderDocumentIdCacheKey(root, relativePath)] = documentId
+            while (folderDocumentIdCache.size > MAX_FOLDER_DOCUMENT_ID_CACHE && folderDocumentIdCache.isNotEmpty()) {
+                val oldestKey = folderDocumentIdCache.keys.first()
+                folderDocumentIdCache.remove(oldestKey)
+            }
+        }
+    }
+
     fun folderId(
         root: LibraryRoot,
         relativePath: String,
@@ -444,6 +659,7 @@ object LibraryRepository {
         name: String,
         documentType: DocumentType,
         uriString: String,
+        noteContent: String = "",
     ): LibrarySearchIndexEntry {
         val title = name.substringBeforeLast('.', name).ifBlank { name }
         val result = LibrarySearchResult(
@@ -458,7 +674,7 @@ object LibraryRepository {
         )
         return LibrarySearchIndexEntry(
             result = result,
-            searchText = searchText(root.name, relativePath, "$title $name"),
+            searchText = searchText(root.name, relativePath, "$title $name $noteContent"),
         )
     }
 
@@ -479,6 +695,7 @@ object LibraryRepository {
     }
 
     private fun searchFolder(
+        context: Context,
         root: LibraryRoot,
         folder: DocumentFile,
         relativePath: String,
@@ -522,6 +739,7 @@ object LibraryRepository {
                     )
                 }
                 searchFolder(
+                    context = context,
                     root = root,
                     folder = child,
                     relativePath = childRelativePath,
@@ -539,7 +757,9 @@ object LibraryRepository {
             }
 
             val documentType = supportedTypeFromName(name) ?: return@forEach
-            if (!lowerName.contains(query)) {
+            val noteMatches = documentType == DocumentType.TXT &&
+                noteSearchText(context, child.uri).contains(query)
+            if (!lowerName.contains(query) && !noteMatches) {
                 return@forEach
             }
             results += LibrarySearchResult(
@@ -554,6 +774,19 @@ object LibraryRepository {
             )
         }
     }
+
+    private fun noteSearchText(
+        context: Context,
+        uri: Uri,
+    ): String =
+        runCatching {
+            context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { reader ->
+                val buffer = CharArray(MAX_NOTE_SEARCH_CHARS)
+                val count = reader.read(buffer)
+                if (count > 0) String(buffer, 0, count) else ""
+            }.orEmpty()
+        }.getOrDefault("")
+            .lowercase(Locale.ROOT)
 
     private fun uniqueNoteName(folder: DocumentFile): String {
         val existingNames = runCatching {

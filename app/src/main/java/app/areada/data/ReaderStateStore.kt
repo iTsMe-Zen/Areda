@@ -32,6 +32,14 @@ object ReaderStateStore {
                     .toFloat()
                     .coerceIn(1.2f, 2.4f),
                 keepScreenOn = item.optBoolean("keepScreenOn", ReaderPreferences().keepScreenOn),
+                volumeButtonsTurnPages = item.optBoolean(
+                    "volumeButtonsTurnPages",
+                    ReaderPreferences().volumeButtonsTurnPages,
+                ),
+                invertVolumeButtons = item.optBoolean(
+                    "invertVolumeButtons",
+                    ReaderPreferences().invertVolumeButtons,
+                ),
             )
         }.getOrDefault(ReaderPreferences())
     }
@@ -43,6 +51,8 @@ object ReaderStateStore {
             put("fontSizeSp", preferences.fontSizeSp.coerceIn(14, 30))
             put("lineSpacing", preferences.lineSpacing.coerceIn(1.2f, 2.4f).toDouble())
             put("keepScreenOn", preferences.keepScreenOn)
+            put("volumeButtonsTurnPages", preferences.volumeButtonsTurnPages)
+            put("invertVolumeButtons", preferences.invertVolumeButtons)
         }
 
         context

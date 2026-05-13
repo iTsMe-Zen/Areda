@@ -24,6 +24,8 @@ data class ReaderPreferences(
     val fontSizeSp: Int = 18,
     val lineSpacing: Float = 1.7f,
     val keepScreenOn: Boolean = false,
+    val volumeButtonsTurnPages: Boolean = false,
+    val invertVolumeButtons: Boolean = false,
 )
 
 data class ReaderRenderPalette(

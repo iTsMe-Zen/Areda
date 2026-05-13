@@ -2,6 +2,8 @@ package app.areada.reader
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
+import app.areada.data.AreadaCacheManager
 import app.areada.data.ReaderPreferences
 import app.areada.data.ReaderRenderPalette
 import app.areada.data.ReaderThemeMode
@@ -20,8 +22,14 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.net.URI
 import java.util.Locale
+import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import javax.xml.parsers.DocumentBuilderFactory
+
+private const val EpubLogTag = "AreadaEpub"
+private const val EpubReadyMarkerName = ".areada_epub_ready_v2"
+private const val EpubArchiveFileName = "book.epub"
+private val CssUrlRegex = Regex("""url\(\s*(['"]?)(.*?)\1\s*\)""", RegexOption.IGNORE_CASE)
 
 data class EpubBook(
     val title: String,
@@ -55,61 +63,78 @@ object EpubEngine {
         paletteOverride: ReaderRenderPalette? = null,
     ): RenderedChapter =
         withContext(Dispatchers.IO) {
-            renderBlocking(book, chapterIndex, preferences, paletteOverride)
+            runCatching {
+                renderBlocking(book, chapterIndex, preferences, paletteOverride)
+            }.onFailure { throwable ->
+                logRenderFailure(book, chapterIndex, throwable)
+            }.getOrThrow()
         }
+
+    fun isCacheUsable(book: EpubBook): Boolean =
+        book.extractedRoot.isDirectory &&
+            File(book.extractedRoot, EpubReadyMarkerName).isFile &&
+            book.archiveFile?.isFile == true &&
+            book.chapters.isNotEmpty()
 
     private fun parseBlocking(context: Context, uri: Uri, fallbackTitle: String): EpubBook {
         val root = File(
             context.cacheDir,
             "areada/epub/${uri.toString().hashCode().toUInt().toString(16)}",
         )
-        return try {
-            val readyMarker = File(root, ".areada_epub_ready_v2")
-            val archiveFile = File(root, "book.epub")
-            if ((!readyMarker.exists() || !archiveFile.isFile) && root.exists()) {
+        return AreadaCacheManager.withCacheLock {
+            try {
+                val readyMarker = File(root, EpubReadyMarkerName)
+                val archiveFile = File(root, EpubArchiveFileName)
+                if ((!readyMarker.exists() || !archiveFile.isFile) && root.exists()) {
+                    root.deleteRecursively()
+                }
+                if (!archiveFile.isFile) {
+                    root.mkdirs()
+                    copyArchive(context, uri, archiveFile)
+                }
+
+                ZipFile(archiveFile).use { zip ->
+                    val containerDocument = readZipXml(zip, "META-INF/container.xml")
+                    val rootFile = containerDocument
+                        .getElementsByTagNameNS("*", "rootfile")
+                        .item(0) as? Element
+                        ?: throw IllegalArgumentException("Invalid or unsupported EPUB file.")
+
+                    val packagePath = rootFile.getAttribute("full-path")
+                        .replace('\\', '/')
+                        .trimStart('/')
+                    val packageDocument = readZipXml(zip, packagePath)
+
+                    val manifest = buildManifest(packageDocument)
+                    val packageDirectory = packagePath.substringBeforeLast('/', "")
+                    val titleByHref = buildTitleByHref(zip, packageDocument, manifest, packageDirectory)
+                    val chapters = buildChapters(root, zip, packageDocument, manifest, packageDirectory, titleByHref)
+                    require(chapters.isNotEmpty()) { "This EPUB does not contain readable chapters." }
+
+                    val title = packageDocument
+                        .getElementsByTagNameNS("*", "title")
+                        .item(0)
+                        ?.textContent
+                        ?.trim()
+                        ?.ifBlank { null }
+                        ?: fallbackTitle
+
+                    readyMarker.writeText("ready")
+                    val now = System.currentTimeMillis()
+                    root.setLastModified(now)
+                    archiveFile.setLastModified(now)
+                    readyMarker.setLastModified(now)
+                    EpubBook(
+                        title = title,
+                        extractedRoot = root,
+                        chapters = chapters,
+                        archiveFile = archiveFile,
+                    )
+                }
+            } catch (throwable: Throwable) {
                 root.deleteRecursively()
+                throw IllegalArgumentException(cleanEpubError(throwable), throwable)
             }
-            if (!archiveFile.isFile) {
-                root.mkdirs()
-                copyArchive(context, uri, archiveFile)
-            }
-
-            ZipFile(archiveFile).use { zip ->
-                val containerDocument = readZipXml(zip, "META-INF/container.xml")
-                val rootFile = containerDocument
-                    .getElementsByTagNameNS("*", "rootfile")
-                    .item(0) as? Element
-                    ?: throw IllegalArgumentException("Invalid or unsupported EPUB file.")
-
-                val packagePath = rootFile.getAttribute("full-path")
-                    .replace('\\', '/')
-                    .trimStart('/')
-                val packageDocument = readZipXml(zip, packagePath)
-
-                val manifest = buildManifest(packageDocument)
-                val packageDirectory = packagePath.substringBeforeLast('/', "")
-                val chapters = buildChapters(root, zip, packageDocument, manifest, packageDirectory)
-                require(chapters.isNotEmpty()) { "This EPUB does not contain readable chapters." }
-
-                val title = packageDocument
-                    .getElementsByTagNameNS("*", "title")
-                    .item(0)
-                    ?.textContent
-                    ?.trim()
-                    ?.ifBlank { null }
-                    ?: fallbackTitle
-
-                readyMarker.writeText("ready")
-                EpubBook(
-                    title = title,
-                    extractedRoot = root,
-                    chapters = chapters,
-                    archiveFile = archiveFile,
-                )
-            }
-        } catch (throwable: Throwable) {
-            root.deleteRecursively()
-            throw IllegalArgumentException(cleanEpubError(throwable), throwable)
         }
     }
 
@@ -120,15 +145,18 @@ object EpubEngine {
         paletteOverride: ReaderRenderPalette?,
     ): RenderedChapter {
         val chapter = book.chapters.getOrNull(chapterIndex) ?: error("Chapter not found.")
-        ensureChapterExtracted(book, chapter)
-        val rawHtml = chapter.file.readText()
+        AreadaCacheManager.withCacheLock {
+            ensureChapterExtracted(book, chapter)
+        }
         val baseUrl = chapter.file.parentFile?.toURI()?.toString().orEmpty()
         val palette = paletteOverride ?: preferences.themeMode.renderPalette()
         val fontSize = preferences.fontSizeSp.coerceIn(14, 30)
         val lineSpacing = preferences.lineSpacing.coerceIn(1.2f, 2.4f)
         val colorScheme = if (preferences.themeMode == ReaderThemeMode.DARK) "dark" else "light"
-        val normalizedDocument = Jsoup.parse(rawHtml, baseUrl, Parser.htmlParser())
-        ensureReferencedAssets(book, chapter, normalizedDocument)
+        val normalizedDocument = parseChapterDocument(chapter.file, baseUrl)
+        AreadaCacheManager.withCacheLock {
+            ensureReferencedAssets(book, chapter, normalizedDocument)
+        }
         val renderedDocument = buildRenderedDocument(
             sourceDocument = normalizedDocument,
             baseUrl = baseUrl,
@@ -172,16 +200,13 @@ object EpubEngine {
             body * {
               box-sizing: border-box;
               max-width: 100%;
-              font-family: inherit !important;
-              font-size: inherit !important;
-              line-height: inherit !important;
               text-decoration: none !important;
               text-decoration-line: none !important;
             }
             p, div, span, li, td, th, blockquote, pre, em, strong, i, b, u, a, font, small, sup, sub, ins, section, article {
+              font-family: inherit !important;
               font-size: inherit !important;
               line-height: inherit !important;
-              font-family: inherit !important;
               text-decoration: none !important;
               text-decoration-line: none !important;
             }
@@ -254,7 +279,6 @@ object EpubEngine {
         baseUrl: String,
     ): JsoupHtmlDocument {
         sourceDocument.select("script").remove()
-        sourceDocument.select("[style]").removeAttr("style")
 
         val renderedDocument = Jsoup.parse(
             "<!doctype html><html><head></head><body></body></html>",
@@ -279,8 +303,7 @@ object EpubEngine {
             .filterNot { child ->
                 when (child.normalName()) {
                     "meta" -> child.hasAttr("charset") || child.hasAttr("http-equiv")
-                    "script", "style" -> true
-                    "link" -> child.attr("rel").contains("stylesheet", ignoreCase = true)
+                    "script" -> true
                     else -> false
                 }
             }
@@ -292,6 +315,26 @@ object EpubEngine {
         return renderedDocument
     }
 
+    private fun parseChapterDocument(
+        file: File,
+        baseUrl: String,
+    ): JsoupHtmlDocument {
+        val xmlDocument = runCatching {
+            Jsoup.parse(file, null, baseUrl, Parser.xmlParser())
+        }.getOrNull()
+
+        if (xmlDocument?.hasRenderableBody() == true) {
+            return xmlDocument
+        }
+
+        return Jsoup.parse(file, null, baseUrl, Parser.htmlParser())
+    }
+
+    private fun JsoupHtmlDocument.hasRenderableBody(): Boolean {
+        val body = selectFirst("body") ?: body()
+        return body.children().isNotEmpty() || body.text().isNotBlank()
+    }
+
     private fun buildManifest(document: Document): Map<String, ManifestItem> {
         val nodes = document.getElementsByTagNameNS("*", "item")
         return buildMap {
@@ -300,11 +343,108 @@ object EpubEngine {
                 val id = element.getAttribute("id").trim()
                 val href = element.getAttribute("href").trim()
                 val mediaType = element.getAttribute("media-type").trim()
+                val properties = element.getAttribute("properties").trim()
                 if (id.isNotEmpty() && href.isNotEmpty()) {
-                    put(id, ManifestItem(href, mediaType))
+                    put(id, ManifestItem(href, mediaType, properties))
                 }
             }
         }
+    }
+
+    private fun buildTitleByHref(
+        zip: ZipFile,
+        document: Document,
+        manifest: Map<String, ManifestItem>,
+        packageDirectory: String,
+    ): Map<String, String> {
+        val titles = linkedMapOf<String, String>()
+
+        navManifestItems(manifest).forEach { item ->
+            val navPath = normalizeArchivePath(packageDirectory, decodeArchivePath(item.href))
+            val navDirectory = navPath.substringBeforeLast('/', "")
+            val navText = readZipText(zip, navPath) ?: return@forEach
+            val navDocument = runCatching {
+                Jsoup.parse(navText, "", Parser.xmlParser())
+            }.getOrNull() ?: return@forEach
+
+            tocLinks(navDocument).forEach { link ->
+                val title = cleanTocTitle(link.text())
+                val archivePath = archiveReferenceFrom(navDirectory, link.attr("href")) ?: return@forEach
+                if (title.isNotBlank()) {
+                    titles.putIfAbsent(archivePath, title)
+                }
+            }
+        }
+
+        ncxManifestItems(document, manifest).forEach { item ->
+            val ncxPath = normalizeArchivePath(packageDirectory, decodeArchivePath(item.href))
+            val ncxDirectory = ncxPath.substringBeforeLast('/', "")
+            val ncxDocument = runCatching {
+                readZipXml(zip, ncxPath)
+            }.getOrNull() ?: return@forEach
+            val navPoints = ncxDocument.getElementsByTagNameNS("*", "navPoint")
+            repeat(navPoints.length) { index ->
+                val navPoint = navPoints.item(index) as? Element ?: return@repeat
+                val content = navPoint
+                    .getElementsByTagNameNS("*", "content")
+                    .item(0) as? Element ?: return@repeat
+                val archivePath = archiveReferenceFrom(ncxDirectory, content.getAttribute("src")) ?: return@repeat
+                val title = cleanTocTitle(
+                    navPoint
+                        .getElementsByTagNameNS("*", "text")
+                        .item(0)
+                        ?.textContent
+                        .orEmpty(),
+                )
+                if (title.isNotBlank()) {
+                    titles.putIfAbsent(archivePath, title)
+                }
+            }
+        }
+
+        return titles
+    }
+
+    private fun tocLinks(document: JsoupHtmlDocument): List<org.jsoup.nodes.Element> {
+        val tocNav = document.select("nav").firstOrNull { nav ->
+            nav.attributes().any { attribute ->
+                val key = attribute.key.lowercase(Locale.ROOT)
+                (key == "type" || key == "epub:type" || key.endsWith(":type")) &&
+                    attribute.value.contains("toc", ignoreCase = true)
+            } || nav.attr("role").contains("doc-toc", ignoreCase = true)
+        }
+        return (tocNav ?: document).select("a[href]")
+    }
+
+    private fun navManifestItems(manifest: Map<String, ManifestItem>): List<ManifestItem> =
+        manifest.values.filter { item ->
+            item.properties
+                .split(' ')
+                .any { property -> property.equals("nav", ignoreCase = true) } ||
+                item.href.endsWith("nav.xhtml", ignoreCase = true) ||
+                item.href.endsWith("toc.xhtml", ignoreCase = true)
+        }
+
+    private fun ncxManifestItems(
+        document: Document,
+        manifest: Map<String, ManifestItem>,
+    ): List<ManifestItem> {
+        val items = linkedSetOf<ManifestItem>()
+        val spine = document.getElementsByTagNameNS("*", "spine").item(0) as? Element
+        spine?.getAttribute("toc")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { tocId -> manifest[tocId] }
+            ?.let { item -> items += item }
+
+        manifest.values
+            .filter { item ->
+                item.mediaType.equals("application/x-dtbncx+xml", ignoreCase = true) ||
+                    item.href.endsWith(".ncx", ignoreCase = true)
+            }
+            .forEach { item -> items += item }
+
+        return items.toList()
     }
 
     private fun buildChapters(
@@ -313,6 +453,7 @@ object EpubEngine {
         document: Document,
         manifest: Map<String, ManifestItem>,
         packageDirectory: String,
+        titleByHref: Map<String, String>,
     ): List<EpubChapter> {
         val nodes = document.getElementsByTagNameNS("*", "itemref")
         return buildList {
@@ -325,14 +466,14 @@ object EpubEngine {
                     return@repeat
                 }
 
-                val archivePath = normalizeArchivePath(packageDirectory, manifestItem.href)
-                if (zip.getEntry(archivePath) == null) {
+                val archivePath = normalizeArchivePath(packageDirectory, decodeArchivePath(manifestItem.href))
+                if (findZipEntry(zip, archivePath) == null) {
                     return@repeat
                 }
 
                 add(
                     EpubChapter(
-                        title = prettyChapterTitle(manifestItem.href, index),
+                        title = titleByHref[archivePath] ?: prettyChapterTitle(manifestItem.href, index),
                         file = resolveInside(root, archivePath),
                         archivePath = archivePath,
                     ),
@@ -361,10 +502,18 @@ object EpubEngine {
 
     private fun readZipXml(zip: ZipFile, archivePath: String): Document {
         val normalizedPath = normalizeArchivePath("", archivePath)
-        val entry = zip.getEntry(normalizedPath)
+        val entry = findZipEntry(zip, normalizedPath)
             ?: throw IllegalArgumentException("Invalid or unsupported EPUB file.")
         return zip.getInputStream(entry).use { input ->
             parseXml(input)
+        }
+    }
+
+    private fun readZipText(zip: ZipFile, archivePath: String): String? {
+        val normalizedPath = normalizeArchivePath("", archivePath)
+        val entry = findZipEntry(zip, normalizedPath) ?: return null
+        return zip.getInputStream(entry).use { input ->
+            input.bufferedReader(Charsets.UTF_8).readText()
         }
     }
 
@@ -394,11 +543,17 @@ object EpubEngine {
         val archiveFile = book.archiveFile ?: return
         val chapterDirectory = chapter.archivePath.substringBeforeLast('/', "")
         val archivePaths = linkedSetOf<String>()
+        val cssPaths = linkedSetOf<String>()
 
-        document.select("[src], [href], [poster]").forEach { element ->
-            archiveReferenceFrom(chapterDirectory, element.attr("src"))?.let { archivePaths += it }
-            archiveReferenceFrom(chapterDirectory, element.attr("href"))?.let { archivePaths += it }
-            archiveReferenceFrom(chapterDirectory, element.attr("poster"))?.let { archivePaths += it }
+        document.getAllElements().forEach { element ->
+            listOf("src", "href", "xlink:href", "data", "poster", "background").forEach { attribute ->
+                val rawReference = element.attr(attribute)
+                val archivePath = archiveReferenceFrom(chapterDirectory, rawReference) ?: return@forEach
+                archivePaths += archivePath
+                if (isCssReference(rawReference, archivePath)) {
+                    cssPaths += archivePath
+                }
+            }
         }
         document.select("[srcset]").forEach { element ->
             element.attr("srcset")
@@ -407,6 +562,14 @@ object EpubEngine {
                 .forEach { candidate ->
                     archiveReferenceFrom(chapterDirectory, candidate)?.let { archivePaths += it }
                 }
+        }
+        document.select("style").forEach { styleElement ->
+            cssArchiveReferences(chapterDirectory, styleElement.data())
+                .forEach { archivePath -> archivePaths += archivePath }
+        }
+        document.select("[style]").forEach { element ->
+            cssArchiveReferences(chapterDirectory, element.attr("style"))
+                .forEach { archivePath -> archivePaths += archivePath }
         }
 
         if (archivePaths.isEmpty()) {
@@ -417,7 +580,43 @@ object EpubEngine {
             archivePaths.forEach { archivePath ->
                 extractEntry(zip, book.extractedRoot, archivePath)
             }
+            cssPaths.forEach { cssPath ->
+                val cssDirectory = cssPath.substringBeforeLast('/', "")
+                readZipText(zip, cssPath)
+                    ?.let { css -> cssArchiveReferences(cssDirectory, css) }
+                    ?.forEach { archivePath -> extractEntry(zip, book.extractedRoot, archivePath) }
+            }
         }
+    }
+
+    private fun isCssReference(rawReference: String, archivePath: String): Boolean {
+        val lowerReference = rawReference.substringBefore('#').substringBefore('?').lowercase(Locale.ROOT)
+        return lowerReference.endsWith(".css") || archivePath.lowercase(Locale.ROOT).endsWith(".css")
+    }
+
+    private fun cssArchiveReferences(
+        basePath: String,
+        css: String,
+    ): List<String> =
+        CssUrlRegex.findAll(css)
+            .mapNotNull { match -> match.groupValues.getOrNull(2) }
+            .mapNotNull { reference -> archiveReferenceFrom(basePath, reference) }
+            .distinct()
+            .toList()
+
+    private fun logRenderFailure(
+        book: EpubBook,
+        chapterIndex: Int,
+        throwable: Throwable,
+    ) {
+        val chapter = book.chapters.getOrNull(chapterIndex)
+        Log.e(
+            EpubLogTag,
+            "Unable to render EPUB section index=$chapterIndex total=${book.chapters.size} " +
+                "archivePath=${chapter?.archivePath.orEmpty()} file=${chapter?.file?.path.orEmpty()} " +
+                "archiveExists=${book.archiveFile?.isFile == true} root=${book.extractedRoot.path}: ${throwable.message}",
+            throwable,
+        )
     }
 
     private fun extractEntry(zip: ZipFile, root: File, archivePath: String): File? {
@@ -426,11 +625,19 @@ object EpubEngine {
             return null
         }
         val target = resolveInside(root, normalizedPath)
-        if (target.isFile || target.isDirectory) {
+        val entry = findZipEntry(zip, normalizedPath) ?: return null
+        if (target.isDirectory && entry.isDirectory) {
             return target
         }
 
-        val entry = zip.getEntry(normalizedPath) ?: return null
+        if (target.isFile && !entry.isDirectory) {
+            val expectedSize = entry.size
+            val existingSize = target.length()
+            if (existingSize > 0L && (expectedSize < 0L || existingSize == expectedSize)) {
+                return target
+            }
+        }
+
         if (entry.isDirectory) {
             target.mkdirs()
             return target
@@ -451,6 +658,18 @@ object EpubEngine {
             tempFile.delete()
         }
         return target
+    }
+
+    private fun findZipEntry(zip: ZipFile, archivePath: String): ZipEntry? {
+        val normalizedPath = normalizeArchivePath("", archivePath)
+        if (normalizedPath.isBlank()) {
+            return null
+        }
+        zip.getEntry(normalizedPath)?.let { entry -> return entry }
+        val lowerPath = normalizedPath.lowercase(Locale.ROOT)
+        return zip.entries().asSequence().firstOrNull { entry ->
+            entry.name.replace('\\', '/').lowercase(Locale.ROOT) == lowerPath
+        }
     }
 
     private fun archiveReferenceFrom(basePath: String, rawReference: String): String? {
@@ -481,7 +700,9 @@ object EpubEngine {
             lower.startsWith("javascript:") ||
             lower.startsWith("file:") ||
             lower.startsWith("android.resource:")
-    }    private fun parseXml(file: File): Document =
+    }
+
+    private fun parseXml(file: File): Document =
         file.inputStream().use { input -> parseXml(input) }
 
     private fun parseXml(inputStream: InputStream): Document {
@@ -500,15 +721,21 @@ object EpubEngine {
 
     private fun normalizeArchivePath(basePath: String, relativePath: String): String {
         val segments = mutableListOf<String>()
-        val combined = listOf(basePath, relativePath)
-            .filter { it.isNotBlank() }
-            .joinToString("/")
-            .replace('\\', '/')
+        val normalizedRelative = relativePath.replace('\\', '/')
+        val combined = if (normalizedRelative.startsWith("/")) {
+            normalizedRelative.trimStart('/')
+        } else {
+            listOf(basePath, normalizedRelative)
+                .filter { it.isNotBlank() }
+                .joinToString("/")
+        }.replace('\\', '/')
 
         combined.split("/").forEach { part ->
             when (part) {
                 "", "." -> Unit
-                ".." -> if (segments.isNotEmpty()) segments.removeAt(segments.lastIndex)
+                ".." -> if (segments.isNotEmpty()) {
+                    segments.removeAt(segments.lastIndex)
+                }
                 else -> segments += part
             }
         }
@@ -542,7 +769,7 @@ object EpubEngine {
             .trim()
 
         if (stem.isBlank() || stem.equals("index", ignoreCase = true)) {
-            return "Chapter ${index + 1}"
+            return "Section ${index + 1}"
         }
 
         return stem.split(' ')
@@ -558,8 +785,14 @@ object EpubEngine {
             }
     }
 
+    private fun cleanTocTitle(rawTitle: String): String =
+        rawTitle
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
     private data class ManifestItem(
         val href: String,
         val mediaType: String,
+        val properties: String,
     )
 }
