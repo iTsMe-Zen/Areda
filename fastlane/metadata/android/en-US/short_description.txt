@@ -1,1 +1,1 @@
-A lightweight offline EPUB, TXT, and PDF reader.
+A lightweight offline reader for EPUB, PDF, TXT, and FB2.

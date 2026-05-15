@@ -1,15 +1,19 @@
 Areada is a minimal offline Android reader focused on lightweight local reading.
 
-It supports EPUB, TXT, and PDF files with a clean monochrome interface, local folder access, saved reading progress, bookmarks, and basic plain-text notes.
+It supports EPUB, PDF, TXT, and FB2 files with a clean monochrome interface, local folder access, saved reading progress, bookmarks, search, filters, and basic plain-text notes.
 
 Features:
-- EPUB, TXT, and PDF support
+- EPUB, PDF, TXT, and FB2 support
+- FB2 support for .fb2, .fb2.zip, and .fbz files
 - Local plain-text notes
 - Bookmarks and recent reading
 - Saved reading progress
+- Search and file-type filters
+- Folder-aware filtering
 - Reader themes, font options, and font size settings
-- EPUB chapter navigation
-- PDF rendering through Android PdfRenderer
+- EPUB title, ToC, section navigation, and external link handling
+- PDF rendering with support for visible annotations/callouts/highlights on supported Android versions
+- PDF internal/external link handling with confirmation for external links
 - Storage Access Framework folder picker
 - Offline-only reading
 - No internet permission

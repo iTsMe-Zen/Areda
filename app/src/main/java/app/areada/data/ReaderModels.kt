@@ -6,6 +6,7 @@ enum class DocumentType {
     EPUB,
     PDF,
     TXT,
+    FB2,
 }
 
 data class ReaderDocument(

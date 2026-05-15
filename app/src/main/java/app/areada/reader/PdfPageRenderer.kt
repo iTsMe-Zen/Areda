@@ -4,16 +4,43 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.pdf.PdfRenderer
+import android.graphics.pdf.PdfRendererPreV
+import android.graphics.pdf.RenderParams
 import android.net.Uri
+import android.os.Build
+import android.os.ext.SdkExtensions
+import android.util.Log
 import java.io.Closeable
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-private const val PdfRenderScale = 2.25f
-private const val PdfMaxRenderWidthPx = 2800
-private const val PdfMaxBitmapPixels = 10_000_000
+private const val PdfRenderScale = 1.5f
+private const val PdfMaxRenderWidthPx = 2000
+private const val PdfMaxBitmapPixels = 4_500_000
+private const val PdfRendererLogTag = "AreadaPdf"
+private const val PdfTextAnnotationFlag = 0x2
+private const val PdfHighlightAnnotationFlag = 0x4
+private const val PdfStampAnnotationFlag = 0x8
+private const val PdfFreeTextAnnotationFlag = 0x10
+private const val PdfFormContentEnabled = 0x1
+private const val PdfExtensionRenderParamsVersion = 13
+private const val PdfExtensionFreeTextVersion = 18
+private const val PdfExtensionFormContentVersion = 19
+
+data class PdfLinkTarget(
+    val bounds: List<RectF>,
+    val uri: Uri? = null,
+    val pageIndex: Int? = null,
+)
+
+data class PdfLinkLayer(
+    val pageWidth: Int,
+    val pageHeight: Int,
+    val links: List<PdfLinkTarget>,
+)
 
 class PdfPageRenderer(
     context: Context,
@@ -21,44 +48,25 @@ class PdfPageRenderer(
 ) : Closeable {
     private val fileDescriptor = context.contentResolver.openFileDescriptor(uri, "r")
         ?: error("Unable to read that PDF.")
-    private val renderer = PdfRenderer(fileDescriptor)
+    private val backend: PdfRenderBackend = createPdfRenderBackend(fileDescriptor)
     private var closed = false
 
     val pageCount: Int
         get() = synchronized(this) {
-            if (closed) 0 else renderer.pageCount
+            if (closed) 0 else backend.pageCount
         }
 
     fun renderPage(pageIndex: Int, widthPx: Int): Bitmap {
         synchronized(this) {
             check(!closed) { "PDF renderer is closed." }
-            require(pageIndex in 0 until renderer.pageCount) { "Page out of range." }
+            return backend.renderPage(pageIndex, widthPx)
+        }
+    }
 
-            val safeWidth = max(widthPx, 1)
-            val page = renderer.openPage(pageIndex)
-            try {
-                val aspectRatio = page.height.toFloat() / page.width.toFloat()
-                val targetWidth = (safeWidth * PdfRenderScale)
-                    .roundToInt()
-                    .coerceAtLeast(safeWidth)
-                    .coerceAtMost(PdfMaxRenderWidthPx)
-                val pixelCappedWidth = sqrt(PdfMaxBitmapPixels / aspectRatio)
-                    .roundToInt()
-                    .coerceAtLeast(1)
-                val renderWidth = targetWidth.coerceAtMost(pixelCappedWidth)
-                val heightPx = max((renderWidth * aspectRatio).roundToInt(), 1)
-                val bitmap = Bitmap.createBitmap(renderWidth, heightPx, Bitmap.Config.ARGB_8888)
-                bitmap.eraseColor(Color.WHITE)
-                page.render(
-                    bitmap,
-                    Rect(0, 0, renderWidth, heightPx),
-                    null,
-                    PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY,
-                )
-                return bitmap
-            } finally {
-                page.close()
-            }
+    fun loadLinkLayer(pageIndex: Int): PdfLinkLayer? {
+        synchronized(this) {
+            check(!closed) { "PDF renderer is closed." }
+            return backend.loadLinkLayer(pageIndex)
         }
     }
 
@@ -68,8 +76,276 @@ class PdfPageRenderer(
                 return
             }
             closed = true
-            runCatching { renderer.close() }
+            runCatching { backend.close() }
             runCatching { fileDescriptor.close() }
         }
     }
 }
+
+private interface PdfRenderBackend : Closeable {
+    val pageCount: Int
+    fun renderPage(pageIndex: Int, widthPx: Int): Bitmap
+    fun loadLinkLayer(pageIndex: Int): PdfLinkLayer?
+}
+
+private class ModernPdfRenderBackend(
+    private val renderer: PdfRenderer,
+) : PdfRenderBackend {
+    private val renderParams by lazy { createPdfRenderParams() }
+
+    override val pageCount: Int
+        get() = renderer.pageCount
+
+    override fun renderPage(pageIndex: Int, widthPx: Int): Bitmap {
+        require(pageIndex in 0 until renderer.pageCount) { "Page out of range." }
+        val page = renderer.openPage(pageIndex)
+        try {
+            val target = createPdfBitmapTarget(page.width, page.height, widthPx)
+            page.render(target.bitmap, target.destination, null, renderParams)
+            return target.bitmap
+        } finally {
+            page.close()
+        }
+    }
+
+    override fun loadLinkLayer(pageIndex: Int): PdfLinkLayer? {
+        require(pageIndex in 0 until renderer.pageCount) { "Page out of range." }
+        val page = renderer.openPage(pageIndex)
+        return try {
+            page.toPdfLinkLayer()
+        } catch (error: Throwable) {
+            Log.w(PdfRendererLogTag, "Unable to load PDF links from platform renderer.", error)
+            null
+        } finally {
+            page.close()
+        }
+    }
+
+    override fun close() {
+        renderer.close()
+    }
+}
+
+private class ExtensionPdfRenderBackend(
+    private val renderer: PdfRendererPreV,
+) : PdfRenderBackend {
+    private val renderParams by lazy { createPdfRenderParams() }
+
+    override val pageCount: Int
+        get() = renderer.pageCount
+
+    override fun renderPage(pageIndex: Int, widthPx: Int): Bitmap {
+        require(pageIndex in 0 until renderer.pageCount) { "Page out of range." }
+        val page = renderer.openPage(pageIndex)
+        try {
+            val target = createPdfBitmapTarget(page.width, page.height, widthPx)
+            page.render(target.bitmap, target.destination, null, renderParams)
+            return target.bitmap
+        } finally {
+            page.close()
+        }
+    }
+
+    override fun loadLinkLayer(pageIndex: Int): PdfLinkLayer? {
+        require(pageIndex in 0 until renderer.pageCount) { "Page out of range." }
+        val page = renderer.openPage(pageIndex)
+        return try {
+            page.toPdfLinkLayer()
+        } catch (error: Throwable) {
+            Log.w(PdfRendererLogTag, "Unable to load PDF links from extension renderer.", error)
+            null
+        } finally {
+            page.close()
+        }
+    }
+
+    override fun close() {
+        renderer.close()
+    }
+}
+
+private class LegacyPdfRenderBackend(
+    private val renderer: PdfRenderer,
+) : PdfRenderBackend {
+    override val pageCount: Int
+        get() = renderer.pageCount
+
+    override fun renderPage(pageIndex: Int, widthPx: Int): Bitmap {
+        require(pageIndex in 0 until renderer.pageCount) { "Page out of range." }
+        val page = renderer.openPage(pageIndex)
+        try {
+            val target = createPdfBitmapTarget(page.width, page.height, widthPx)
+            page.render(
+                target.bitmap,
+                target.destination,
+                null,
+                PdfRenderer.Page.RENDER_MODE_FOR_PRINT,
+            )
+            return target.bitmap
+        } finally {
+            page.close()
+        }
+    }
+
+    override fun loadLinkLayer(pageIndex: Int): PdfLinkLayer? = null
+
+    override fun close() {
+        renderer.close()
+    }
+}
+
+private fun PdfRenderer.Page.toPdfLinkLayer(): PdfLinkLayer {
+    val externalLinks = runCatching {
+        getLinkContents().mapNotNull { link ->
+            val bounds = link.bounds.orEmpty()
+            val uri = link.uri
+            if (bounds.isEmpty()) {
+                null
+            } else {
+                PdfLinkTarget(bounds = bounds, uri = uri)
+            }
+        }
+    }.getOrDefault(emptyList())
+    val gotoLinks = runCatching {
+        getGotoLinks().mapNotNull { link ->
+            val bounds = link.bounds.orEmpty()
+            val destination = link.destination
+            if (bounds.isEmpty()) {
+                null
+            } else {
+                PdfLinkTarget(bounds = bounds, pageIndex = destination.pageNumber)
+            }
+        }
+    }.getOrDefault(emptyList())
+    return PdfLinkLayer(
+        pageWidth = width,
+        pageHeight = height,
+        links = externalLinks + gotoLinks,
+    )
+}
+
+private fun PdfRendererPreV.Page.toPdfLinkLayer(): PdfLinkLayer {
+    val externalLinks = runCatching {
+        getLinkContents().mapNotNull { link ->
+            val bounds = link.bounds.orEmpty()
+            val uri = link.uri
+            if (bounds.isEmpty()) {
+                null
+            } else {
+                PdfLinkTarget(bounds = bounds, uri = uri)
+            }
+        }
+    }.getOrDefault(emptyList())
+    val gotoLinks = runCatching {
+        getGotoLinks().mapNotNull { link ->
+            val bounds = link.bounds.orEmpty()
+            val destination = link.destination
+            if (bounds.isEmpty()) {
+                null
+            } else {
+                PdfLinkTarget(bounds = bounds, pageIndex = destination.pageNumber)
+            }
+        }
+    }.getOrDefault(emptyList())
+    return PdfLinkLayer(
+        pageWidth = width,
+        pageHeight = height,
+        links = externalLinks + gotoLinks,
+    )
+}
+
+private data class PdfBitmapTarget(
+    val bitmap: Bitmap,
+    val destination: Rect,
+)
+
+private fun createPdfRenderBackend(
+    fileDescriptor: android.os.ParcelFileDescriptor,
+): PdfRenderBackend =
+    when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM -> {
+            ModernPdfRenderBackend(PdfRenderer(fileDescriptor))
+        }
+        supportsPdfRendererPreV() -> {
+            ExtensionPdfRenderBackend(PdfRendererPreV(fileDescriptor))
+        }
+        else -> {
+            LegacyPdfRenderBackend(PdfRenderer(fileDescriptor))
+        }
+    }
+
+private fun createPdfBitmapTarget(
+    pageWidth: Int,
+    pageHeight: Int,
+    widthPx: Int,
+): PdfBitmapTarget {
+    val safeWidth = max(widthPx, 1)
+    val aspectRatio = pageHeight.toFloat() / pageWidth.toFloat()
+    val targetWidth = (safeWidth * PdfRenderScale)
+        .roundToInt()
+        .coerceAtLeast(safeWidth)
+        .coerceAtMost(PdfMaxRenderWidthPx)
+    val pixelCappedWidth = sqrt(PdfMaxBitmapPixels / aspectRatio)
+        .roundToInt()
+        .coerceAtLeast(1)
+    val renderWidth = targetWidth.coerceAtMost(pixelCappedWidth)
+    val heightPx = max((renderWidth * aspectRatio).roundToInt(), 1)
+    val bitmap = Bitmap.createBitmap(renderWidth, heightPx, Bitmap.Config.ARGB_8888)
+    bitmap.eraseColor(Color.WHITE)
+    return PdfBitmapTarget(
+        bitmap = bitmap,
+        destination = Rect(0, 0, renderWidth, heightPx),
+    )
+}
+
+private fun createPdfRenderParams(): RenderParams {
+    val flags = supportedAnnotationRenderFlags()
+    val builder = RenderParams.Builder(RenderParams.RENDER_MODE_FOR_DISPLAY)
+    runCatching {
+        builder.setRenderFlags(flags, flags)
+    }.getOrElse { error ->
+        val fallbackFlags = PdfTextAnnotationFlag or PdfHighlightAnnotationFlag
+        Log.w(PdfRendererLogTag, "Full annotation flags unavailable; falling back to text/highlight.", error)
+        runCatching {
+            builder.setRenderFlags(fallbackFlags, fallbackFlags)
+        }.getOrElse { fallbackError ->
+            Log.w(PdfRendererLogTag, "Annotation render flags unavailable; rendering page content only.", fallbackError)
+        }
+    }
+    enablePdfFormContentIfAvailable(builder)
+    return builder.build()
+}
+
+private fun supportedAnnotationRenderFlags(): Int {
+    var flags = PdfTextAnnotationFlag or PdfHighlightAnnotationFlag
+    if (pdfExtensionVersion() >= PdfExtensionFreeTextVersion || Build.VERSION.SDK_INT > Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+        flags = flags or PdfStampAnnotationFlag or PdfFreeTextAnnotationFlag
+    }
+    return flags
+}
+
+private fun enablePdfFormContentIfAvailable(builder: RenderParams.Builder): Boolean {
+    if (pdfExtensionVersion() < PdfExtensionFormContentVersion && Build.VERSION.SDK_INT <= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+        return false
+    }
+    return runCatching {
+        builder.javaClass
+            .getMethod("setRenderFormContentMode", Int::class.javaPrimitiveType)
+            .invoke(builder, PdfFormContentEnabled)
+        true
+    }.getOrElse {
+        false
+    }
+}
+
+private fun supportsPdfRendererPreV(): Boolean =
+    Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM &&
+        pdfExtensionVersion() >= PdfExtensionRenderParamsVersion
+
+private fun pdfExtensionVersion(): Int =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S)
+    } else {
+        0
+    }

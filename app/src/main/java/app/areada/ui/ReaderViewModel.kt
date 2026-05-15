@@ -9,6 +9,7 @@ import app.areada.data.AreadaCacheManager
 import app.areada.data.DocumentResolver
 import app.areada.data.DocumentType
 import app.areada.data.LibraryBookEntry
+import app.areada.data.LibraryFileFilter
 import app.areada.data.LibraryFolderEntry
 import app.areada.data.LibraryFolderPickerEntry
 import app.areada.data.LibraryPathSegment
@@ -58,10 +59,12 @@ data class ReaderUiState(
     val currentPathSegments: List<LibraryPathSegment> = emptyList(),
     val currentFolders: List<LibraryFolderEntry> = emptyList(),
     val currentBooks: List<LibraryBookEntry> = emptyList(),
+    val folderDocumentTypesById: Map<String, Set<DocumentType>> = emptyMap(),
     val searchQuery: String = "",
     val searchResults: List<LibrarySearchResult> = emptyList(),
     val isSearching: Boolean = false,
     val librarySortMode: LibrarySortMode = LibrarySortMode.NAME_ASC,
+    val libraryFileFilter: LibraryFileFilter = LibraryFileFilter.ALL,
     val pinnedLibraryItemIds: Set<String> = emptySet(),
     val libraryAddedAtById: Map<String, Long> = emptyMap(),
     val currentScreen: ReaderScreen = ReaderScreen.Home,
@@ -89,6 +92,7 @@ sealed interface ReaderScreen {
         val initialText: String,
         val initialScrollFraction: Float = 0f,
         val deleteOnDiscard: Boolean = false,
+        val editable: Boolean = true,
     ) : ReaderScreen
 }
 
@@ -140,7 +144,6 @@ class ReaderViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             val recents = RecentDocumentStore.load(appContext)
                 .sortedByDescending { it.lastOpenedAt }
-                .take(3)
             val preferences = ReaderStateStore.loadPreferences(appContext)
             val progressByUri = ReaderStateStore.loadProgress(appContext)
             val bookmarks = ReaderStateStore.loadBookmarks(appContext)
@@ -484,11 +487,16 @@ class ReaderViewModel : ViewModel() {
         if (!force && searchIndexSignature == signature && searchIndex.isNotEmpty()) {
             val currentQuery = _uiState.value.searchQuery
             val currentResults = filterSearchIndex(currentQuery)
+            val folderDocumentTypes = folderDocumentTypesById(searchIndex)
             _uiState.update { state ->
                 if (state.searchQuery.isBlank()) {
-                    state.copy(isSearching = false)
+                    state.copy(
+                        folderDocumentTypesById = folderDocumentTypes,
+                        isSearching = false,
+                    )
                 } else {
                     state.copy(
+                        folderDocumentTypesById = folderDocumentTypes,
                         searchResults = currentResults,
                         isSearching = false,
                     )
@@ -523,6 +531,7 @@ class ReaderViewModel : ViewModel() {
                 return@launch
             }
 
+            val folderDocumentTypes = folderDocumentTypesById(rebuiltIndex)
             searchIndex = rebuiltIndex
             searchIndexSignature = signature
             val currentQuery = _uiState.value.searchQuery
@@ -531,9 +540,13 @@ class ReaderViewModel : ViewModel() {
             }
             _uiState.update { state ->
                 if (state.searchQuery.isBlank()) {
-                    state.copy(isSearching = false)
+                    state.copy(
+                        folderDocumentTypesById = folderDocumentTypes,
+                        isSearching = false,
+                    )
                 } else {
                     state.copy(
+                        folderDocumentTypesById = folderDocumentTypes,
                         searchResults = currentResults,
                         isSearching = false,
                     )
@@ -548,6 +561,7 @@ class ReaderViewModel : ViewModel() {
         searchIndex = emptyList()
         searchIndexSignature = ""
         requestedSearchIndexSignature = ""
+        _uiState.update { state -> state.copy(folderDocumentTypesById = emptyMap()) }
     }
 
     private fun pauseSearchIndexingForReaderOpen() {
@@ -672,12 +686,14 @@ class ReaderViewModel : ViewModel() {
                         initialZoomScale = savedProgress?.pdfZoomScale?.coerceIn(1f, 5f) ?: 1f,
                     )
 
-                    DocumentType.TXT -> ReaderScreen.Text(
+                    DocumentType.TXT,
+                    DocumentType.FB2 -> ReaderScreen.Text(
                         document = document,
                         initialText = withContext(Dispatchers.IO) {
-                            LibraryRepository.readText(appContext, document.uri)
+                            LibraryRepository.readTextLikeDocument(appContext, document)
                         },
                         initialScrollFraction = savedProgress?.txtScrollFraction?.coerceIn(0f, 1f) ?: 0f,
+                        editable = document.type == DocumentType.TXT,
                     )
                 }
 
@@ -864,7 +880,7 @@ class ReaderViewModel : ViewModel() {
                 uriString = document.uriString,
                 title = document.title,
                 type = document.type,
-                positionLabel = "TXT ${(safeScroll * 100f).toInt().coerceIn(0, 100)}%",
+                positionLabel = "${document.type.name} ${(safeScroll * 100f).toInt().coerceIn(0, 100)}%",
                 txtScrollFraction = safeScroll,
                 createdAt = now,
                 updatedAt = now,
@@ -1143,6 +1159,27 @@ class ReaderViewModel : ViewModel() {
         reloadCurrentLibraryFolder(context)
     }
 
+    fun updateLibraryFileFilter(
+        context: Context,
+        filter: LibraryFileFilter,
+    ) {
+        val roots = _uiState.value.libraryRoots
+        _uiState.update { state ->
+            state.copy(libraryFileFilter = filter)
+        }
+        if (
+            filter.documentType != null &&
+            roots.isNotEmpty() &&
+            (searchIndex.isEmpty() || searchIndexSignature != roots.signature())
+        ) {
+            rebuildSearchIndex(
+                context = context.applicationContext,
+                roots = roots,
+                delayMillis = 0L,
+            )
+        }
+    }
+
     fun togglePinFolder(
         context: Context,
         folder: LibraryFolderEntry,
@@ -1366,6 +1403,9 @@ class ReaderViewModel : ViewModel() {
         document: ReaderDocument,
         text: String,
     ) {
+        if (document.type != DocumentType.TXT) {
+            return
+        }
         val appContext = context.applicationContext
         val uriString = document.uriString
         val saveSequence = synchronized(textSaveSequenceByUri) {
@@ -1707,7 +1747,7 @@ class ReaderViewModel : ViewModel() {
         return buildList {
             add(updated)
             addAll(recents.filterNot { it.uriString == document.uriString })
-        }.take(3)
+        }
     }
 
     private fun toggleBookmark(
@@ -1750,7 +1790,8 @@ class ReaderViewModel : ViewModel() {
         val newId = when (type) {
             DocumentType.EPUB -> epubBookmarkId(document.uriString, epubChapterIndex, epubScrollFraction)
             DocumentType.PDF -> pdfBookmarkId(document.uriString, pdfPageIndex)
-            DocumentType.TXT -> txtBookmarkId(document.uriString, txtScrollFraction)
+            DocumentType.TXT,
+            DocumentType.FB2 -> txtBookmarkId(document.uriString, txtScrollFraction)
         }
         return copy(
             id = newId,
@@ -1942,6 +1983,39 @@ class ReaderViewModel : ViewModel() {
         }
     }
 
+    private fun folderDocumentTypesById(
+        index: List<LibrarySearchIndexEntry>,
+    ): Map<String, Set<DocumentType>> {
+        val typesByFolder = linkedMapOf<String, MutableSet<DocumentType>>()
+        index.forEach { entry ->
+            val result = entry.result
+            if (result.type != LibrarySearchResultType.BOOK) {
+                return@forEach
+            }
+            val documentType = result.documentType ?: return@forEach
+            val pathSegments = result.relativePath
+                .split('/')
+                .filter { segment -> segment.isNotBlank() }
+            if (pathSegments.size <= 1) {
+                return@forEach
+            }
+
+            var folderPath = ""
+            pathSegments.dropLast(1).forEach { segment ->
+                folderPath = if (folderPath.isBlank()) segment else "$folderPath/$segment"
+                val folderId = LibraryRepository.folderId(
+                    root = LibraryRoot(
+                        treeUriString = result.rootUriString,
+                        name = result.rootName,
+                    ),
+                    relativePath = folderPath,
+                )
+                typesByFolder.getOrPut(folderId) { linkedSetOf() } += documentType
+            }
+        }
+        return typesByFolder.mapValues { (_, types) -> types.toSet() }
+    }
+
     private fun prepareFolderState(
         context: Context,
         folderState: app.areada.data.LibraryFolderState,
@@ -2028,7 +2102,8 @@ class ReaderViewModel : ViewModel() {
             DocumentType.PDF -> progress.pdfPageCount > 0 &&
                 progress.pdfPageIndex >= progress.pdfPageCount - 1
 
-            DocumentType.TXT -> false
+            DocumentType.TXT,
+            DocumentType.FB2 -> false
         }
 
     private fun displayError(

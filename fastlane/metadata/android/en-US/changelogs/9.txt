@@ -1,0 +1,11 @@
+Added EPUB/PDF/TXT/FB2 filters with folder-aware filtering.
+Added one global filter for Search, Bookmarks, Reading, and Collection.
+Added lightweight FB2 support for .fb2, .fb2.zip, and .fbz files.
+Improved Bookmarks and Reading sections with cleaner dropdown behavior.
+Improved home layout with cleaner Search, Manage folders, Collection, and current-folder sections.
+Improved PDF rendering for existing annotations/callouts/highlights on supported Android versions.
+Added PDF internal/external hyperlink handling with an Open link? prompt for external links.
+Improved EPUB external link handling while preserving internal EPUB navigation.
+Stabilized EPUB rendering, title/TOC behavior, image/resource loading, and external links.
+Fixed note timestamp crashes, dark-theme cursor visibility, long-note stability, autosave behavior, popup dismissal, and added a Discard? safety prompt.
+Kept Areada offline-first with no internet permission.

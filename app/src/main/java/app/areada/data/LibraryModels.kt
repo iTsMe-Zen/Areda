@@ -24,6 +24,17 @@ enum class LibrarySortMode(val label: String) {
     DATE_ADDED_DESC("Newest added"),
 }
 
+enum class LibraryFileFilter(
+    val label: String,
+    val documentType: DocumentType?,
+) {
+    ALL("All", null),
+    EPUB("EPUB", DocumentType.EPUB),
+    PDF("PDF", DocumentType.PDF),
+    TXT("TXT", DocumentType.TXT),
+    FB2("FB2", DocumentType.FB2),
+}
+
 data class LibraryFolderEntry(
     val id: String,
     val relativePath: String,

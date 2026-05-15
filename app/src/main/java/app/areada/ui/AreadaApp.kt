@@ -3,8 +3,10 @@ package app.areada.ui
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color as AndroidColor
+import android.graphics.RectF
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -21,9 +23,11 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -65,6 +69,7 @@ import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FormatListBulleted
 import androidx.compose.material.icons.outlined.History
@@ -106,6 +111,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -114,9 +120,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
@@ -128,6 +136,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
@@ -139,6 +148,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -148,6 +158,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import app.areada.R
 import app.areada.data.DocumentType
 import app.areada.data.LibraryBookEntry
+import app.areada.data.LibraryFileFilter
 import app.areada.data.LibraryFolderEntry
 import app.areada.data.LibraryFolderPickerEntry
 import app.areada.data.LibraryPathSegment
@@ -168,6 +179,8 @@ import app.areada.data.pdfBookmarkId
 import app.areada.data.txtBookmarkId
 import app.areada.reader.EpubChapter
 import app.areada.reader.EpubEngine
+import app.areada.reader.PdfLinkLayer
+import app.areada.reader.PdfLinkTarget
 import app.areada.reader.PdfPageRenderer
 import app.areada.reader.RenderedChapter
 import app.areada.ui.theme.ReaderTheme
@@ -263,6 +276,8 @@ fun AreadaApp(
                         bookmarks = uiState.bookmarks,
                         preferences = uiState.preferences,
                         sortMode = uiState.librarySortMode,
+                        fileFilter = uiState.libraryFileFilter,
+                        folderDocumentTypesById = uiState.folderDocumentTypesById,
                         progressByUri = uiState.progressByUri,
                         onChooseFolder = { folderPicker.launch(null) },
                         onRefresh = { viewModel.refreshCurrentFolder(context, showLoading = true) },
@@ -279,6 +294,7 @@ fun AreadaApp(
                         onRemoveBookmark = { bookmark -> viewModel.removeBookmark(context, bookmark) },
                         onRemoveRecent = { recent -> viewModel.removeRecent(context, recent) },
                         onSortModeChange = { sortMode -> viewModel.updateLibrarySortMode(context, sortMode) },
+                        onFileFilterChange = { filter -> viewModel.updateLibraryFileFilter(context, filter) },
                         onDeleteFolder = { folder -> viewModel.deleteLibraryFolder(context, folder) },
                         onDeleteBook = { book -> viewModel.deleteLibraryBook(context, book) },
                         onRenameFolder = { folder, name -> viewModel.renameLibraryFolder(context, folder, name) },
@@ -406,6 +422,8 @@ private fun HomeScreen(
     bookmarks: List<ReadingBookmark>,
     preferences: ReaderPreferences,
     sortMode: LibrarySortMode,
+    fileFilter: LibraryFileFilter,
+    folderDocumentTypesById: Map<String, Set<DocumentType>>,
     progressByUri: Map<String, ReadingProgress>,
     onChooseFolder: () -> Unit,
     onRefresh: () -> Unit,
@@ -422,6 +440,7 @@ private fun HomeScreen(
     onRemoveBookmark: (ReadingBookmark) -> Unit,
     onRemoveRecent: (RecentDocument) -> Unit,
     onSortModeChange: (LibrarySortMode) -> Unit,
+    onFileFilterChange: (LibraryFileFilter) -> Unit,
     onDeleteFolder: (LibraryFolderEntry) -> Unit,
     onDeleteBook: (LibraryBookEntry) -> Unit,
     onRenameFolder: (LibraryFolderEntry, String) -> Unit,
@@ -439,7 +458,19 @@ private fun HomeScreen(
     var showFolderPicker by rememberSaveable {
         mutableStateOf(false)
     }
+    var showFileFilter by rememberSaveable {
+        mutableStateOf(false)
+    }
+    var searchFocused by rememberSaveable {
+        mutableStateOf(false)
+    }
     var showBookmarks by rememberSaveable {
+        mutableStateOf(false)
+    }
+    var showReading by rememberSaveable {
+        mutableStateOf(false)
+    }
+    var showChooseFolderPrompt by rememberSaveable {
         mutableStateOf(false)
     }
     var actionTarget by remember {
@@ -463,6 +494,14 @@ private fun HomeScreen(
 
     BackHandler(enabled = showFolderPicker) {
         showFolderPicker = false
+    }
+
+    BackHandler(enabled = showFileFilter) {
+        showFileFilter = false
+    }
+    val focusManager = LocalFocusManager.current
+    BackHandler(enabled = searchFocused) {
+        focusManager.clearFocus()
     }
 
     if (showSettings) {
@@ -571,17 +610,53 @@ private fun HomeScreen(
         )
     }
 
+    val visibleBooks = remember(books, fileFilter) {
+        books.filterBooksByLibraryFileFilter(fileFilter)
+    }
+    val visibleFolders = remember(folders, fileFilter, folderDocumentTypesById) {
+        folders.filterFoldersByLibraryFileFilter(fileFilter, folderDocumentTypesById)
+    }
+    val visibleSearchResults = remember(searchResults, fileFilter, folderDocumentTypesById) {
+        searchResults.filterSearchResultsByLibraryFileFilter(fileFilter, folderDocumentTypesById)
+    }
+    val visibleBookmarks = remember(bookmarks, fileFilter) {
+        bookmarks.filterBookmarksByLibraryFileFilter(fileFilter)
+    }
+    val visibleRecents = remember(recents, fileFilter) {
+        recents.filterRecentsByLibraryFileFilter(fileFilter)
+    }
+    val collectionTitle = remember(currentRelativePath) {
+        currentRelativePath
+            .trim()
+            .replace('\\', '/')
+            .split('/')
+            .lastOrNull { segment -> segment.isNotBlank() }
+            ?: "Collection"
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
     ) { paddingValues ->
-        LazyColumn(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues)
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .padding(horizontal = 20.dp, vertical = 8.dp),
+                .pointerInput(searchFocused) {
+                    if (searchFocused) {
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false)
+                            focusManager.clearFocus()
+                        }
+                    }
+                },
         ) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues)
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 20.dp, vertical = 8.dp),
+            ) {
             item {
                 val headerActionColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.68f)
                 Row(
@@ -674,7 +749,11 @@ private fun HomeScreen(
                         currentRelativePath = currentRelativePath,
                         expanded = showFolderPicker,
                         onToggleExpanded = {
-                            showFolderPicker = !showFolderPicker
+                            if (folderPickerEntries.isEmpty()) {
+                                showChooseFolderPrompt = true
+                            } else {
+                                showFolderPicker = !showFolderPicker
+                            }
                         },
                         modifier = Modifier
                             .weight(1f)
@@ -693,72 +772,118 @@ private fun HomeScreen(
                         },
                     )
                 }
-                if (roots.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End,
-                    ) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    SearchBar(
+                        query = searchQuery,
+                        isSearching = isSearching,
+                        onQueryChange = onSearchQueryChange,
+                        onFocusChanged = { focused -> searchFocused = focused },
+                        modifier = Modifier.weight(1f),
+                    )
+                    LibraryFilterButton(
+                        filter = fileFilter,
+                        expanded = showFileFilter,
+                        onClick = { showFileFilter = !showFileFilter },
+                    )
+                    if (roots.isNotEmpty()) {
                         Text(
                             text = "Manage folders",
                             modifier = Modifier
                                 .clickable { showManageFolders = true }
-                                .padding(vertical = 5.dp),
+                                .padding(vertical = 7.dp),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.primary,
                             fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(12.dp))
-                BookmarksSection(
-                    bookmarks = bookmarks,
-                    expanded = showBookmarks,
-                    onToggleExpanded = { showBookmarks = !showBookmarks },
-                    onOpenBookmark = onOpenBookmark,
-                    onRemoveBookmark = { bookmark -> bookmarkRemovalTarget = bookmark },
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                SearchBar(
-                    query = searchQuery,
-                    isSearching = isSearching,
-                    onQueryChange = onSearchQueryChange,
-                )
-                if (searchQuery.isNotBlank()) {
+                if (showFileFilter) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LibraryFilterInlinePanel(
+                        selectedFilter = fileFilter,
+                        onSelectFilter = { filter ->
+                            onFileFilterChange(filter)
+                            showFileFilter = false
+                        },
+                    )
+                }
+                if (searchQuery.isBlank()) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    BookmarksSection(
+                        bookmarks = visibleBookmarks,
+                        expanded = showBookmarks,
+                        onToggleExpanded = { showBookmarks = !showBookmarks },
+                        onOpenBookmark = onOpenBookmark,
+                        onRemoveBookmark = { bookmark -> bookmarkRemovalTarget = bookmark },
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                    ReadingSectionHeader(
+                        count = visibleRecents.size,
+                        expanded = showReading,
+                        onToggleExpanded = { showReading = !showReading },
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                } else {
                     Spacer(modifier = Modifier.height(8.dp))
                     SearchResults(
-                        results = searchResults,
+                        results = visibleSearchResults,
                         isSearching = isSearching,
                         onOpenResult = onOpenSearchResult,
                     )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    BookmarksSection(
+                        bookmarks = visibleBookmarks,
+                        expanded = showBookmarks,
+                        onToggleExpanded = { showBookmarks = !showBookmarks },
+                        onOpenBookmark = onOpenBookmark,
+                        onRemoveBookmark = { bookmark -> bookmarkRemovalTarget = bookmark },
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                    ReadingSectionHeader(
+                        count = visibleRecents.size,
+                        expanded = showReading,
+                        onToggleExpanded = { showReading = !showReading },
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
                 }
-                Spacer(modifier = Modifier.height(20.dp))
-                SectionHeader(title = "Reading")
-                Spacer(modifier = Modifier.height(8.dp))
             }
 
-            if (recents.isEmpty()) {
-                item {
-                    InfoCard(message = "No recent files yet.")
-                }
-            } else {
-                items(
-                    items = recents.take(3),
-                    key = { recent -> "recent:${recent.uriString}" },
-                ) { recent ->
-                    SwipeActionBox(
-                        actionLabel = "Remove",
-                        onSwipe = { recentRemovalTarget = recent },
-                    ) {
-                        BookRow(
-                            title = recent.title,
-                            type = recent.type,
-                            progressLabel = buildResumeLabel(progressByUri[recent.uriString], recent.type),
-                            pinned = false,
-                            onClick = { onOpenRecent(recent) },
+            if (showReading) {
+                if (visibleRecents.isEmpty()) {
+                    item {
+                        InfoCard(
+                            message = if (fileFilter == LibraryFileFilter.ALL) {
+                                "No recent files yet."
+                            } else {
+                                "No recent ${fileFilter.label} files yet."
+                            },
                         )
                     }
-                    Spacer(modifier = Modifier.height(8.dp))
+                } else {
+                    items(
+                        items = visibleRecents,
+                        key = { recent -> "recent:${recent.uriString}" },
+                    ) { recent ->
+                        SwipeActionBox(
+                            actionLabel = "Remove",
+                            onSwipe = { recentRemovalTarget = recent },
+                        ) {
+                            BookRow(
+                                title = recent.title,
+                                type = recent.type,
+                                progressLabel = buildResumeLabel(progressByUri[recent.uriString], recent.type),
+                                pinned = false,
+                                onClick = { onOpenRecent(recent) },
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
                 }
             }
 
@@ -767,10 +892,17 @@ private fun HomeScreen(
                     Spacer(modifier = Modifier.height(20.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        SectionHeader(title = "Collection")
+                        Text(
+                            text = collectionTitle,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                         Text(
                             text = sortMode.label,
                             modifier = Modifier
@@ -783,9 +915,9 @@ private fun HomeScreen(
                     }
                     Spacer(modifier = Modifier.height(10.dp))
                 }
-                if (folders.isNotEmpty()) {
+                if (visibleFolders.isNotEmpty()) {
                     items(
-                        items = folders,
+                        items = visibleFolders,
                         key = { folder -> "folder:${folder.id}" },
                     ) { folder ->
                         SwipeActionBox(
@@ -802,14 +934,9 @@ private fun HomeScreen(
                     }
                 }
 
-                if (books.isNotEmpty()) {
-                    item {
-                        Spacer(modifier = Modifier.height(20.dp))
-                        SectionHeader(title = "Books")
-                        Spacer(modifier = Modifier.height(10.dp))
-                    }
+                if (visibleBooks.isNotEmpty()) {
                     items(
-                        items = books,
+                        items = visibleBooks,
                         key = { book -> "book:${book.id}" },
                     ) { book ->
                         SwipeActionBox(
@@ -826,15 +953,27 @@ private fun HomeScreen(
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                     }
-                } else if (folders.isEmpty()) {
+                } else if (visibleFolders.isEmpty()) {
                     item {
-                        InfoCard(message = "No EPUB, PDF, or TXT files here.")
+                        InfoCard(message = fileFilter.emptyLibraryMessage())
                     }
                 }
+            }
+            }
+
+            if (showChooseFolderPrompt) {
+                NotePopup(
+                    note = "Please choose folder from [Choose Folder]",
+                    onClose = { showChooseFolderPrompt = false },
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(horizontal = 28.dp),
+                )
             }
         }
     }
 }
+
 
 @Composable
 private fun HeaderIconButton(
@@ -1019,6 +1158,34 @@ private fun displayError(
         message.isBlank() -> fallback
         else -> message
     }
+}
+
+private fun openExternalLinkWithChooser(
+    context: Context,
+    uri: Uri,
+) {
+    val intent = Intent(Intent.ACTION_VIEW, uri)
+        .addCategory(Intent.CATEGORY_BROWSABLE)
+    runCatching {
+        context.startActivity(
+            Intent.createChooser(intent, "Open link with")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    }.onFailure {
+        Toast.makeText(context, "No app can open this link", Toast.LENGTH_SHORT).show()
+    }
+}
+
+@Composable
+private fun OpenLinkDialog(
+    onDismiss: () -> Unit,
+    onOpen: () -> Unit,
+) {
+    CompactChoiceDialog(
+        question = "Open link?",
+        onDismiss = onDismiss,
+        onYes = onOpen,
+    )
 }
 
 @Composable
@@ -1251,6 +1418,145 @@ private fun LibrarySortMode.next(): LibrarySortMode {
     return entries[nextIndex]
 }
 
+private fun List<LibraryBookEntry>.filterBooksByLibraryFileFilter(filter: LibraryFileFilter): List<LibraryBookEntry> =
+    filter.documentType?.let { type -> this.filter { book -> book.type == type } } ?: this
+
+private fun List<ReadingBookmark>.filterBookmarksByLibraryFileFilter(filter: LibraryFileFilter): List<ReadingBookmark> =
+    filter.documentType?.let { type -> this.filter { bookmark -> bookmark.type == type } } ?: this
+
+private fun List<RecentDocument>.filterRecentsByLibraryFileFilter(filter: LibraryFileFilter): List<RecentDocument> =
+    filter.documentType?.let { type -> this.filter { recent -> recent.type == type } } ?: this
+
+private fun List<LibraryFolderEntry>.filterFoldersByLibraryFileFilter(
+    filter: LibraryFileFilter,
+    folderDocumentTypesById: Map<String, Set<DocumentType>>,
+): List<LibraryFolderEntry> {
+    val documentType = filter.documentType ?: return this
+    if (folderDocumentTypesById.isEmpty()) {
+        return this
+    }
+    return filter { folder -> folderDocumentTypesById[folder.id]?.contains(documentType) == true }
+}
+
+private fun List<LibrarySearchResult>.filterSearchResultsByLibraryFileFilter(
+    filter: LibraryFileFilter,
+    folderDocumentTypesById: Map<String, Set<DocumentType>>,
+): List<LibrarySearchResult> {
+    val documentType = filter.documentType ?: return this
+    if (folderDocumentTypesById.isEmpty()) {
+        return filter { result ->
+            result.type == LibrarySearchResultType.FOLDER || result.documentType == documentType
+        }
+    }
+    return filter { result ->
+        when (result.type) {
+            LibrarySearchResultType.BOOK -> result.documentType == documentType
+            LibrarySearchResultType.FOLDER -> folderDocumentTypesById[result.id]?.contains(documentType) == true
+        }
+    }
+}
+
+private fun LibraryFileFilter.emptyLibraryMessage(): String =
+    when (this) {
+        LibraryFileFilter.ALL -> "No EPUB, PDF, TXT, or FB2 files here."
+        LibraryFileFilter.EPUB -> "No EPUB files found."
+        LibraryFileFilter.PDF -> "No PDF files found."
+        LibraryFileFilter.TXT -> "No TXT files found."
+        LibraryFileFilter.FB2 -> "No FB2 files found."
+    }
+
+private fun LibraryFileFilter.icon() =
+    when (this) {
+        LibraryFileFilter.ALL -> Icons.Outlined.LibraryBooks
+        LibraryFileFilter.EPUB -> Icons.Outlined.ImportContacts
+        LibraryFileFilter.PDF -> Icons.Outlined.PictureAsPdf
+        LibraryFileFilter.TXT -> Icons.Outlined.Description
+        LibraryFileFilter.FB2 -> Icons.Outlined.LibraryBooks
+    }
+
+@Composable
+private fun LibraryFilterButton(
+    filter: LibraryFileFilter,
+    expanded: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .clickable(onClick = onClick)
+            .padding(vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.FilterList,
+            contentDescription = "Filter files",
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.primary,
+        )
+        Text(
+            text = filter.label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Icon(
+            imageVector = Icons.Outlined.ArrowDropDown,
+            contentDescription = null,
+            modifier = Modifier
+                .size(18.dp)
+                .graphicsLayer { rotationZ = if (expanded) 180f else 0f },
+            tint = MaterialTheme.colorScheme.primary,
+        )
+    }
+}
+
+@Composable
+private fun LibraryFilterInlinePanel(
+    selectedFilter: LibraryFileFilter,
+    onSelectFilter: (LibraryFileFilter) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RectangleShape,
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 6.dp),
+        ) {
+            LibraryFileFilter.entries.forEach { filter ->
+                val selected = filter == selectedFilter
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelectFilter(filter) }
+                        .background(
+                            if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f) else Color.Transparent,
+                            RectangleShape,
+                        )
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = filter.icon(),
+                        contentDescription = null,
+                        tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = filter.label,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun FolderPickerDropdown(
     entries: List<LibraryFolderPickerEntry>,
@@ -1268,7 +1574,7 @@ private fun FolderPickerDropdown(
         modifier = modifier
             .fillMaxWidth()
             .height(44.dp)
-            .clickable(enabled = entries.isNotEmpty()) {
+            .clickable {
                 onToggleExpanded()
             },
         shape = RectangleShape,
@@ -1369,30 +1675,65 @@ private fun SearchBar(
     query: String,
     isSearching: Boolean,
     onQueryChange: (String) -> Unit,
+    onFocusChanged: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    OutlinedTextField(
+    val textColor = MaterialTheme.colorScheme.onSurface
+    val mutedColor = MaterialTheme.colorScheme.onSurfaceVariant
+    BasicTextField(
         value = query,
         onValueChange = onQueryChange,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(52.dp),
+        modifier = modifier
+            .height(40.dp)
+            .onFocusChanged { state -> onFocusChanged(state.isFocused) },
         singleLine = true,
-        leadingIcon = {
-            Icon(
-                imageVector = Icons.Outlined.Search,
-                contentDescription = null,
-            )
-        },
-        trailingIcon = {
-            if (isSearching) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
-                    strokeWidth = 2.dp,
-                )
+        textStyle = MaterialTheme.typography.bodyMedium.copy(color = textColor),
+        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+        decorationBox = { innerTextField ->
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                shape = RectangleShape,
+                color = Color.Transparent,
+                tonalElevation = 0.dp,
+                shadowElevation = 0.dp,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.46f)),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Search,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = mutedColor,
+                    )
+                    Spacer(modifier = Modifier.width(9.dp))
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        if (query.isEmpty()) {
+                            Text(
+                                text = "Search",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = mutedColor.copy(alpha = 0.78f),
+                                maxLines = 1,
+                            )
+                        }
+                        innerTextField()
+                    }
+                    if (isSearching) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                }
             }
-        },
-        placeholder = {
-            Text(text = "Search folders, files, notes")
         },
     )
 }
@@ -1445,6 +1786,39 @@ private fun BookmarksSection(
                     Spacer(modifier = Modifier.height(8.dp))
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ReadingSectionHeader(
+    count: Int,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggleExpanded)
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SectionHeader(title = "Reading")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = count.toString(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Icon(
+                imageVector = Icons.Outlined.ArrowDropDown,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.graphicsLayer {
+                    rotationZ = if (expanded) 180f else 0f
+                },
+            )
         }
     }
 }
@@ -1527,6 +1901,7 @@ private fun SearchResultRow(
                         DocumentType.EPUB -> Icons.Outlined.ImportContacts
                         DocumentType.PDF -> Icons.Outlined.PictureAsPdf
                         DocumentType.TXT -> Icons.Outlined.Description
+                        DocumentType.FB2 -> Icons.Outlined.LibraryBooks
                         null -> Icons.Outlined.LibraryBooks
                     }
                 },
@@ -1803,6 +2178,7 @@ private fun EpubReaderScreen(
     onToggleBookmark: (chapterIndex: Int, chapterCount: Int, scrollFraction: Float, chapterTitle: String) -> Unit,
     onSaveProgress: (chapterIndex: Int, chapterCount: Int, scrollFraction: Float) -> Unit,
 ) {
+    val context = LocalContext.current.applicationContext
     var showSettings by rememberSaveable(screen.document.uriString) {
         mutableStateOf(false)
     }
@@ -1817,6 +2193,9 @@ private fun EpubReaderScreen(
     }
     var noteText by rememberSaveable(screen.document.uriString) {
         mutableStateOf<String?>(null)
+    }
+    var pendingExternalLink by remember(screen.document.uriString) {
+        mutableStateOf<Uri?>(null)
     }
     var showGoToChapter by rememberSaveable(screen.document.uriString) {
         mutableStateOf(false)
@@ -1874,6 +2253,24 @@ private fun EpubReaderScreen(
     val currentBookmarked = bookmarks.any { it.id == currentBookmarkId }
     val latestChapterIndex by rememberUpdatedState(chapterIndex)
     val latestScrollFraction by rememberUpdatedState(scrollFraction)
+    val renderedChapterCache = remember(screen.document.uriString) {
+        mutableStateMapOf<EpubRenderCacheKey, RenderedChapter>()
+    }
+    val renderCacheKey = remember(
+        chapterIndex,
+        preferences.themeMode,
+        preferences.fontChoice,
+        preferences.fontSizeSp,
+        preferences.lineSpacing,
+    ) {
+        EpubRenderCacheKey(
+            chapterIndex = chapterIndex,
+            themeMode = preferences.themeMode,
+            fontChoice = preferences.fontChoice,
+            fontSizeSp = preferences.fontSizeSp,
+            lineSpacingBucket = (preferences.lineSpacing * 100f).roundToInt(),
+        )
+    }
 
     fun switchToChapter(nextIndex: Int) {
         if (nextIndex !in screen.book.chapters.indices || nextIndex == chapterIndex) {
@@ -1918,7 +2315,13 @@ private fun EpubReaderScreen(
         }
     }
 
-    LaunchedEffect(screen.document.uriString, chapterIndex, preferences, renderPalette) {
+    LaunchedEffect(screen.document.uriString, renderCacheKey, renderPalette) {
+        renderedChapterCache[renderCacheKey]?.let { cachedChapter ->
+            renderedChapter = cachedChapter
+            chapterError = null
+            return@LaunchedEffect
+        }
+
         renderedChapter = null
         chapterError = null
         runCatching {
@@ -1930,10 +2333,38 @@ private fun EpubReaderScreen(
             )
         }
             .onSuccess { chapter ->
+                renderedChapterCache[renderCacheKey] = chapter
+                trimEpubRenderCache(renderedChapterCache, renderCacheKey)
                 renderedChapter = chapter
             }
             .onFailure { throwable ->
                 chapterError = displayError(throwable, "Unable to render this section.")
+            }
+    }
+
+    LaunchedEffect(screen.document.uriString, renderCacheKey, renderedChapter) {
+        if (renderedChapter == null) {
+            return@LaunchedEffect
+        }
+        delay(80)
+        listOf(chapterIndex + 1, chapterIndex - 1)
+            .filter { index -> index in screen.book.chapters.indices }
+            .forEach { neighborIndex ->
+                val neighborKey = renderCacheKey.copy(chapterIndex = neighborIndex)
+                if (renderedChapterCache[neighborKey] != null) {
+                    return@forEach
+                }
+                runCatching {
+                    EpubEngine.render(
+                        book = screen.book,
+                        chapterIndex = neighborIndex,
+                        preferences = preferences,
+                        paletteOverride = renderPalette,
+                    )
+                }.onSuccess { chapter ->
+                    renderedChapterCache[neighborKey] = chapter
+                    trimEpubRenderCache(renderedChapterCache, renderCacheKey)
+                }
             }
     }
 
@@ -1955,6 +2386,15 @@ private fun EpubReaderScreen(
             onConfirm = { nextIndex ->
                 switchToChapter(nextIndex)
                 showGoToChapter = false
+            },
+        )
+    }
+    pendingExternalLink?.let { uri ->
+        OpenLinkDialog(
+            onDismiss = { pendingExternalLink = null },
+            onOpen = {
+                pendingExternalLink = null
+                openExternalLinkWithChooser(context, uri)
             },
         )
     }
@@ -1991,9 +2431,7 @@ private fun EpubReaderScreen(
                     val chapter = renderedChapter ?: return@Box
                     key(
                         screen.document.uriString,
-                        chapterIndex,
-                        preferences,
-                        chapter.html.hashCode(),
+                        renderCacheKey,
                     ) {
                         val renderedIndex = chapterIndex
                         EpubWebView(
@@ -2018,6 +2456,7 @@ private fun EpubReaderScreen(
                             onSwipePrevious = ::goToPreviousChapter,
                             onSwipeNext = ::goToNextChapter,
                             onOpenLocalHref = ::openLocalChapterLink,
+                            onOpenExternalLink = { uri -> pendingExternalLink = uri },
                             onNoteOpen = { note ->
                                 noteText = note
                             },
@@ -2214,6 +2653,12 @@ private fun PdfReaderScreen(
     var zoomScale by rememberSaveable(screen.document.uriString, screen.initialZoomScale) {
         mutableFloatStateOf(screen.initialZoomScale.coerceIn(1f, 5f))
     }
+    var pdfLinkLayer by remember(screen.document.uriString, pageIndex) {
+        mutableStateOf<PdfLinkLayer?>(null)
+    }
+    var pendingExternalLink by remember(screen.document.uriString) {
+        mutableStateOf<Uri?>(null)
+    }
     val currentBookmarked = bookmarks.any { it.id == pdfBookmarkId(screen.document.uriString, pageIndex) }
     val tocEntries = remember(pageCount) {
         List(pageCount.coerceAtLeast(0)) { index ->
@@ -2251,6 +2696,15 @@ private fun PdfReaderScreen(
             },
         )
     }
+    pendingExternalLink?.let { uri ->
+        OpenLinkDialog(
+            onDismiss = { pendingExternalLink = null },
+            onOpen = {
+                pendingExternalLink = null
+                openExternalLinkWithChooser(context, uri)
+            },
+        )
+    }
     BackHandler(enabled = showToc) {
         showToc = false
     }
@@ -2283,6 +2737,10 @@ private fun PdfReaderScreen(
         onNext = ::goToNextPage,
     )
 
+    LaunchedEffect(screen.document.uriString, pageIndex) {
+        pdfLinkLayer = null
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
     ) { _ ->
@@ -2292,15 +2750,30 @@ private fun PdfReaderScreen(
             val density = LocalDensity.current
             val horizontalPaddingPx = with(density) { 32.dp.roundToPx() }
             val widthPx = (constraints.maxWidth - horizontalPaddingPx).coerceAtLeast(1)
-            var bitmap by remember(screen.document.uriString, pageIndex, widthPx) {
-                mutableStateOf<Bitmap?>(null)
+            val pageBitmapCache = remember(screen.document.uriString, widthPx) {
+                mutableStateMapOf<Int, Bitmap>()
             }
             var renderError by remember(screen.document.uriString, pageIndex, widthPx) {
                 mutableStateOf<String?>(null)
             }
+            val cachedBitmap = pageBitmapCache[pageIndex]
+
+            DisposableEffect(pageBitmapCache) {
+                onDispose {
+                    pageBitmapCache.values.forEach { bitmap ->
+                        if (!bitmap.isRecycled) {
+                            bitmap.recycle()
+                        }
+                    }
+                    pageBitmapCache.clear()
+                }
+            }
 
             LaunchedEffect(screen.document.uriString, pageIndex, widthPx) {
-                bitmap = null
+                if (pageBitmapCache[pageIndex] != null) {
+                    renderError = null
+                    return@LaunchedEffect
+                }
                 renderError = null
 
                 runCatching {
@@ -2309,18 +2782,47 @@ private fun PdfReaderScreen(
                     }
                 }
                     .onSuccess { rendered ->
-                        bitmap = rendered
+                        pageBitmapCache[pageIndex] = rendered
+                        trimPdfBitmapCache(pageBitmapCache, pageIndex)
                     }
                     .onFailure { throwable ->
                         renderError = displayError(throwable, "Unable to render this page.")
                     }
             }
 
+            LaunchedEffect(screen.document.uriString, pageIndex, widthPx, cachedBitmap) {
+                if (cachedBitmap == null) {
+                    return@LaunchedEffect
+                }
+                delay(120)
+                listOf(pageIndex + 1, pageIndex - 1)
+                    .filter { index -> index in 0 until pageCount && pageBitmapCache[index] == null }
+                    .forEach { neighborIndex ->
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                renderer.renderPage(neighborIndex, widthPx)
+                            }
+                        }.onSuccess { rendered ->
+                            pageBitmapCache[neighborIndex] = rendered
+                            trimPdfBitmapCache(pageBitmapCache, pageIndex)
+                        }
+                    }
+            }
+
+            LaunchedEffect(screen.document.uriString, pageIndex, renderer, cachedBitmap) {
+                if (cachedBitmap == null) {
+                    return@LaunchedEffect
+                }
+                pdfLinkLayer = withContext(Dispatchers.IO) {
+                    runCatching { renderer.loadLinkLayer(pageIndex) }.getOrNull()
+                }
+            }
+
             when {
                 renderError != null -> ReaderMessage(message = renderError ?: "")
-                bitmap == null -> LoadingState(label = "Rendering page")
+                cachedBitmap == null -> LoadingState(label = "Rendering page")
                 else -> {
-                    val pageBitmap = bitmap ?: return@BoxWithConstraints
+                    val pageBitmap = cachedBitmap
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -2379,6 +2881,20 @@ private fun PdfReaderScreen(
                             onReaderTap = {
                                 if (isFullMode) {
                                     fullControlsVisible = !fullControlsVisible
+                                }
+                            },
+                            linkLayer = pdfLinkLayer,
+                            onPdfLink = { target ->
+                                target.pageIndex?.let { targetPage ->
+                                    val safePage = targetPage.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
+                                    if (safePage != pageIndex) {
+                                        onSaveProgress(pageIndex, pageCount, zoomScale)
+                                        pageIndex = safePage
+                                    }
+                                    return@ZoomablePage
+                                }
+                                target.uri?.let { uri ->
+                                    pendingExternalLink = uri
                                 }
                             },
                         )
@@ -2456,6 +2972,9 @@ private fun TextReaderScreen(
     var showRename by rememberSaveable(screen.document.uriString) {
         mutableStateOf(false)
     }
+    var showDiscardPrompt by rememberSaveable(screen.document.uriString) {
+        mutableStateOf(false)
+    }
     var renameText by rememberSaveable(screen.document.uriString) {
         mutableStateOf(screen.document.title)
     }
@@ -2472,6 +2991,11 @@ private fun TextReaderScreen(
     }
     val redoHistory = remember(screen.document.uriString) {
         mutableStateListOf<NoteHistoryEntry>()
+    }
+    val activeTimestampRanges = remember(screen.document.uriString) {
+        mutableStateListOf<NoteStyledRange>().apply {
+            addAll(findRecognizableTimestampRanges(screen.initialText))
+        }
     }
     var noteHistoryOrder by remember(screen.document.uriString) {
         mutableStateOf(0L)
@@ -2525,6 +3049,7 @@ private fun TextReaderScreen(
     val currentBookmarked = bookmarks.any {
         it.id == txtBookmarkId(screen.document.uriString, currentScrollFraction)
     }
+    val isEditable = screen.editable && screen.document.type == DocumentType.TXT
     val renderPalette = rememberReaderRenderPalette(preferences.themeMode)
     val backgroundColor = Color(AndroidColor.parseColor(renderPalette.backgroundHex))
     val textColor = Color(AndroidColor.parseColor(renderPalette.textHex))
@@ -2542,11 +3067,16 @@ private fun TextReaderScreen(
         noteSearchIndex.coerceIn(0, noteSearchMatches.lastIndex)
     }
     val currentSearchRange = noteSearchMatches.getOrNull(currentSearchIndex)
-    val enableInlineNoteStyling = text.length <= NoteInlineStyleMaxChars
+    val activeTimestampStyleRanges = remember(text.length, activeTimestampRanges.toList()) {
+        normalizeNoteStyledRanges(activeTimestampRanges, text.length)
+    }
+    val enableInlineNoteStyling = text.length <= NoteInlineStyleMaxChars &&
+        (activeTimestampStyleRanges.isNotEmpty() || noteSearchMatches.isNotEmpty())
     val noteVisualTransformation: VisualTransformation = remember(
         timestampBackgroundColor,
         searchMatchBackgroundColor,
         currentSearchMatchBackgroundColor,
+        activeTimestampStyleRanges,
         noteSearchMatches,
         currentSearchRange,
         enableInlineNoteStyling,
@@ -2556,6 +3086,7 @@ private fun TextReaderScreen(
                 timestampChipColor = timestampBackgroundColor,
                 searchMatchColor = searchMatchBackgroundColor,
                 currentSearchMatchColor = currentSearchMatchBackgroundColor,
+                timestampRanges = activeTimestampStyleRanges,
                 searchMatches = noteSearchMatches,
                 currentSearchRange = currentSearchRange,
             )
@@ -2567,6 +3098,7 @@ private fun TextReaderScreen(
     fun addNoteHistoryState(
         history: MutableList<NoteHistoryEntry>,
         value: TextFieldValue,
+        timestampRanges: List<NoteStyledRange> = activeTimestampRanges.toList(),
     ) {
         if (history.lastOrNull()?.value?.text == value.text) {
             return
@@ -2577,6 +3109,7 @@ private fun TextReaderScreen(
         noteHistoryOrder += 1L
         history += NoteHistoryEntry(
             value = value,
+            timestampRanges = normalizeNoteStyledRanges(timestampRanges, value.text.length),
             order = noteHistoryOrder,
         )
         trimNoteHistories(undoHistory, redoHistory)
@@ -2614,15 +3147,23 @@ private fun TextReaderScreen(
         recordUndo: Boolean = true,
         forceUndoCheckpoint: Boolean = false,
     ) {
+        if (!isEditable && nextValue.text != noteValue.text) {
+            return
+        }
         if (recordUndo && nextValue.text != noteValue.text) {
             if (shouldRecordUndoCheckpoint(noteValue, nextValue, forceUndoCheckpoint)) {
-                addNoteHistoryState(undoHistory, noteValue)
+                addNoteHistoryState(undoHistory, noteValue, activeTimestampRanges.toList())
                 lastUndoCheckpointAt = SystemClock.uptimeMillis()
                 lastUndoCheckpointLength = noteValue.text.length
             }
             redoHistory.clear()
         }
         if (nextValue.text != noteValue.text) {
+            updateTimestampRangesAfterEdit(
+                activeRanges = activeTimestampRanges,
+                oldText = noteValue.text,
+                newText = nextValue.text,
+            )
             noteEditedSinceOpen = true
             val now = SystemClock.uptimeMillis()
             if (
@@ -2641,18 +3182,23 @@ private fun TextReaderScreen(
     fun undoNoteChange() {
         val previousEntry = undoHistory.lastOrNull() ?: return
         undoHistory.removeAt(undoHistory.lastIndex)
-        addNoteHistoryState(redoHistory, noteValue)
+        addNoteHistoryState(redoHistory, noteValue, activeTimestampRanges.toList())
+        replaceTimestampRanges(activeTimestampRanges, previousEntry.timestampRanges, previousEntry.value.text.length)
         noteValue = previousEntry.value
     }
 
     fun redoNoteChange() {
         val nextEntry = redoHistory.lastOrNull() ?: return
         redoHistory.removeAt(redoHistory.lastIndex)
-        addNoteHistoryState(undoHistory, noteValue)
+        addNoteHistoryState(undoHistory, noteValue, activeTimestampRanges.toList())
+        replaceTimestampRanges(activeTimestampRanges, nextEntry.timestampRanges, nextEntry.value.text.length)
         noteValue = nextEntry.value
     }
 
     fun saveDraftIfChanged(textToSave: String = latestText) {
+        if (!isEditable) {
+            return
+        }
         if (textToSave == lastAutosavedText) {
             return
         }
@@ -2682,17 +3228,33 @@ private fun TextReaderScreen(
 
     fun saveAndLeave() {
         saveOnDispose = false
-        saveDraftIfChanged(latestText)
+        if (isEditable) {
+            saveDraftIfChanged(latestText)
+        }
         onSaveProgress(currentScrollFraction)
         onBack()
     }
 
-    fun discardAndLeave() {
+    fun confirmDiscardAndLeave() {
         saveOnDispose = false
+        showDiscardPrompt = false
         onDiscardText()
     }
 
+    fun discardAndLeave() {
+        if (isEditable) {
+            showDiscardPrompt = true
+        } else {
+            saveOnDispose = false
+            onSaveProgress(currentScrollFraction)
+            onBack()
+        }
+    }
+
     fun insertTimestamp() {
+        if (!isEditable) {
+            return
+        }
         val timestamp = LocalDateTime.now().format(
             DateTimeFormatter.ofPattern("yyyy-MM-dd | hh:mm a :", Locale.US),
         )
@@ -2703,6 +3265,8 @@ private fun TextReaderScreen(
         val prefix = if (selectionStart > 0 && noteValue.text.getOrNull(selectionStart - 1) != '\n') "\n" else ""
         val suffix = if (selectionEnd < noteValue.text.length && noteValue.text.getOrNull(selectionEnd) != '\n') "\n" else ""
         val insertion = "$prefix$timestamp $suffix"
+        val timestampStart = selectionStart + prefix.length
+        val timestampEnd = timestampStart + timestamp.length + 1
         val nextText = buildString {
             append(noteValue.text.substring(0, selectionStart))
             append(insertion)
@@ -2716,6 +3280,11 @@ private fun TextReaderScreen(
             ),
             forceUndoCheckpoint = true,
         )
+        replaceTimestampRanges(
+            activeTimestampRanges,
+            activeTimestampRanges + NoteStyledRange(timestampStart, timestampEnd),
+            nextText.length,
+        )
     }
 
     BackHandler {
@@ -2725,7 +3294,9 @@ private fun TextReaderScreen(
     DisposableEffect(screen.document.uriString) {
         onDispose {
             if (shouldSaveOnDispose) {
-                saveDraftIfChanged(latestText)
+                if (isEditable) {
+                    saveDraftIfChanged(latestText)
+                }
                 onSaveProgress(latestScrollFraction)
             }
         }
@@ -2744,7 +3315,7 @@ private fun TextReaderScreen(
         }
     }
     LaunchedEffect(text, noteEditedSinceOpen) {
-        if (noteEditedSinceOpen && text != lastAutosavedText) {
+        if (isEditable && noteEditedSinceOpen && text != lastAutosavedText) {
             delay(NoteAutosaveDebounceMs)
             saveDraftIfChanged(text)
         }
@@ -2806,6 +3377,13 @@ private fun TextReaderScreen(
             },
         )
     }
+    if (showDiscardPrompt) {
+        CompactChoiceDialog(
+            question = "Discard?",
+            onDismiss = { showDiscardPrompt = false },
+            onYes = ::confirmDiscardAndLeave,
+        )
+    }
     KeepReaderScreenAwake(enabled = preferences.keepScreenOn)
 
     Column(
@@ -2820,22 +3398,26 @@ private fun TextReaderScreen(
             ),
             navigationIcon = {
                 TextButton(onClick = ::discardAndLeave) {
-                    Text(text = "Discard")
+                    Text(text = if (isEditable) "Discard" else "Library")
                 }
             },
             title = {
                 Column {
                     Text(
                         text = screen.document.title,
-                        modifier = Modifier.clickable {
-                            renameText = screen.document.title
-                            showRename = true
+                        modifier = if (isEditable) {
+                            Modifier.clickable {
+                                renameText = screen.document.title
+                                showRename = true
+                            }
+                        } else {
+                            Modifier
                         },
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
-                        text = "TXT",
+                        text = screen.document.type.name,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -2845,12 +3427,14 @@ private fun TextReaderScreen(
                 IconButton(onClick = { showNoteSearch = true }) {
                     Icon(
                         imageVector = Icons.Outlined.Search,
-                        contentDescription = "Search note",
+                        contentDescription = if (isEditable) "Search note" else "Search document",
                         tint = textColor,
                     )
                 }
-                TextButton(onClick = ::saveAndLeave) {
-                    Text(text = "Save")
+                if (isEditable) {
+                    TextButton(onClick = ::saveAndLeave) {
+                        Text(text = "Save")
+                    }
                 }
                 IconButton(onClick = { onToggleBookmark(currentScrollFraction) }) {
                     Icon(
@@ -2909,15 +3493,17 @@ private fun TextReaderScreen(
                     .fillMaxSize()
                     .onSizeChanged { size -> editorHeightPx = size.height }
                     .verticalScroll(scrollState),
+                readOnly = !isEditable,
                 textStyle = MaterialTheme.typography.bodyLarge.copy(
                     color = textColor,
                     fontFamily = preferences.fontChoice.composeFontFamily(),
                     fontSize = preferences.fontSizeSp.sp,
                     lineHeight = (preferences.fontSizeSp * preferences.lineSpacing.coerceIn(1.2f, 2.4f)).sp,
                 ),
+                cursorBrush = SolidColor(textColor),
                 visualTransformation = noteVisualTransformation,
             )
-            if (text.isBlank()) {
+            if (isEditable && text.isBlank()) {
                 Text(
                     text = "Write note...",
                     style = MaterialTheme.typography.bodyLarge.copy(
@@ -2929,15 +3515,17 @@ private fun TextReaderScreen(
                 )
             }
         }
-        NoteEditorHelperBar(
-            backgroundColor = backgroundColor,
-            iconColor = textColor,
-            canUndo = undoHistory.isNotEmpty(),
-            canRedo = redoHistory.isNotEmpty(),
-            onUndo = ::undoNoteChange,
-            onRedo = ::redoNoteChange,
-            onInsertTimestamp = ::insertTimestamp,
-        )
+        if (isEditable) {
+            NoteEditorHelperBar(
+                backgroundColor = backgroundColor,
+                iconColor = textColor,
+                canUndo = undoHistory.isNotEmpty(),
+                canRedo = redoHistory.isNotEmpty(),
+                onUndo = ::undoNoteChange,
+                onRedo = ::redoNoteChange,
+                onInsertTimestamp = ::insertTimestamp,
+            )
+        }
     }
 }
 
@@ -3085,14 +3673,20 @@ private const val NoteAutosaveMinIntervalMs = 1_200L
 private const val NoteAutosaveDebounceMs = 700L
 private const val NoteAutosaveCharacterBatch = 256
 private const val NoteTimestampMaxPrefixLength = 48
-private const val NoteInlineStyleMaxChars = 8_000
+private const val NoteInlineStyleMaxChars = 50_000
 
 private class NoteTextLayoutRef {
     var value: TextLayoutResult? = null
 }
 
+private data class NoteStyledRange(
+    val start: Int,
+    val end: Int,
+)
+
 private data class NoteHistoryEntry(
     val value: TextFieldValue,
+    val timestampRanges: List<NoteStyledRange>,
     val order: Long,
 )
 
@@ -3132,6 +3726,7 @@ private class NoteTextVisualTransformation(
     private val timestampChipColor: Color,
     private val searchMatchColor: Color,
     private val currentSearchMatchColor: Color,
+    private val timestampRanges: List<NoteStyledRange>,
     private val searchMatches: List<IntRange>,
     private val currentSearchRange: IntRange?,
 ) : VisualTransformation {
@@ -3144,11 +3739,16 @@ private class NoteTextVisualTransformation(
         text.paragraphStyles.forEach { style ->
             builder.addStyle(style.item, style.start, style.end)
         }
-        findTimestampPrefixRanges(text.text).forEach { range ->
+        timestampRanges.forEach { range ->
+            val start = range.start.coerceIn(0, text.text.length)
+            val end = range.end.coerceIn(start, text.text.length)
+            if (start >= end) {
+                return@forEach
+            }
             builder.addStyle(
                 style = SpanStyle(background = timestampChipColor),
-                start = range.first,
-                end = range.last + 1,
+                start = start,
+                end = end,
             )
         }
         searchMatches
@@ -3173,20 +3773,162 @@ private class NoteTextVisualTransformation(
     }
 }
 
-private fun findTimestampPrefixRanges(text: String): List<IntRange> {
-    if ('|' !in text || text.length < 12) {
+private data class NoteTextEditDelta(
+    val oldStart: Int,
+    val oldEnd: Int,
+    val newEnd: Int,
+) {
+    val insertedLength: Int get() = (newEnd - oldStart).coerceAtLeast(0)
+    val netDelta: Int get() = insertedLength - (oldEnd - oldStart).coerceAtLeast(0)
+}
+
+private fun updateTimestampRangesAfterEdit(
+    activeRanges: MutableList<NoteStyledRange>,
+    oldText: String,
+    newText: String,
+) {
+    if (activeRanges.isEmpty() || oldText == newText) {
+        return
+    }
+    val delta = noteTextEditDelta(oldText, newText)
+    val updatedRanges = activeRanges.mapNotNull { range ->
+        updateStyledRangeForEdit(range, delta, newText.length)
+    }
+    replaceTimestampRanges(activeRanges, updatedRanges, newText.length)
+}
+
+private fun noteTextEditDelta(
+    oldText: String,
+    newText: String,
+): NoteTextEditDelta {
+    val maxPrefix = minOf(oldText.length, newText.length)
+    var prefix = 0
+    while (prefix < maxPrefix && oldText[prefix] == newText[prefix]) {
+        prefix += 1
+    }
+
+    var oldSuffix = oldText.length
+    var newSuffix = newText.length
+    while (
+        oldSuffix > prefix &&
+        newSuffix > prefix &&
+        oldText[oldSuffix - 1] == newText[newSuffix - 1]
+    ) {
+        oldSuffix -= 1
+        newSuffix -= 1
+    }
+
+    return NoteTextEditDelta(
+        oldStart = prefix,
+        oldEnd = oldSuffix,
+        newEnd = newSuffix,
+    )
+}
+
+private fun updateStyledRangeForEdit(
+    range: NoteStyledRange,
+    delta: NoteTextEditDelta,
+    newTextLength: Int,
+): NoteStyledRange? {
+    val start = range.start.coerceAtLeast(0)
+    val end = range.end.coerceAtLeast(start)
+    if (start >= end) {
+        return null
+    }
+
+    val isInsertionOnly = delta.oldStart == delta.oldEnd
+    val updated = if (isInsertionOnly) {
+        when {
+            delta.oldStart < start -> {
+                range.copy(start = start + delta.netDelta, end = end + delta.netDelta)
+            }
+            delta.oldStart >= end -> {
+                range
+            }
+            else -> {
+                range.copy(end = end + delta.insertedLength)
+            }
+        }
+    } else {
+        when {
+            delta.oldEnd <= start -> {
+                range.copy(start = start + delta.netDelta, end = end + delta.netDelta)
+            }
+            delta.oldStart >= end -> {
+                range
+            }
+            else -> {
+                val newStart = if (delta.oldStart <= start) delta.oldStart else start
+                val newEnd = if (delta.oldEnd >= end) delta.newEnd else end + delta.netDelta
+                NoteStyledRange(newStart, newEnd)
+            }
+        }
+    }
+
+    val safeStart = updated.start.coerceIn(0, newTextLength)
+    val safeEnd = updated.end.coerceIn(safeStart, newTextLength)
+    return if (safeStart < safeEnd) {
+        NoteStyledRange(safeStart, safeEnd)
+    } else {
+        null
+    }
+}
+
+private fun replaceTimestampRanges(
+    activeRanges: MutableList<NoteStyledRange>,
+    ranges: List<NoteStyledRange>,
+    textLength: Int,
+) {
+    activeRanges.clear()
+    activeRanges.addAll(normalizeNoteStyledRanges(ranges, textLength))
+}
+
+private fun normalizeNoteStyledRanges(
+    ranges: List<NoteStyledRange>,
+    textLength: Int,
+): List<NoteStyledRange> {
+    if (textLength <= 0 || ranges.isEmpty()) {
         return emptyList()
     }
 
-    val ranges = mutableListOf<IntRange>()
+    val sortedRanges = ranges
+        .mapNotNull { range ->
+            val start = range.start.coerceIn(0, textLength)
+            val end = range.end.coerceIn(start, textLength)
+            if (start < end) NoteStyledRange(start, end) else null
+        }
+        .sortedWith(compareBy<NoteStyledRange> { it.start }.thenBy { it.end })
+
+    if (sortedRanges.isEmpty()) {
+        return emptyList()
+    }
+
+    val merged = mutableListOf<NoteStyledRange>()
+    sortedRanges.forEach { range ->
+        val previous = merged.lastOrNull()
+        if (previous != null && range.start <= previous.end) {
+            merged[merged.lastIndex] = previous.copy(end = maxOf(previous.end, range.end))
+        } else {
+            merged += range
+        }
+    }
+    return merged
+}
+
+private fun findRecognizableTimestampRanges(text: String): List<NoteStyledRange> {
+    if ('|' !in text || text.length < 20) {
+        return emptyList()
+    }
+
+    val ranges = mutableListOf<NoteStyledRange>()
     var lineStart = 0
     while (lineStart <= text.length) {
         val lineEnd = text.indexOf('\n', lineStart).let { index ->
             if (index < 0) text.length else index
         }
-        timestampPrefixLength(text, lineStart, lineEnd)?.let { length ->
+        recognizableTimestampPrefixLength(text, lineStart, lineEnd)?.let { length ->
             if (length > 0) {
-                ranges += lineStart until (lineStart + length)
+                ranges += NoteStyledRange(lineStart, lineStart + length)
             }
         }
         if (lineEnd >= text.length) {
@@ -3197,26 +3939,31 @@ private fun findTimestampPrefixRanges(text: String): List<IntRange> {
     return ranges
 }
 
-private fun timestampPrefixLength(
+private fun recognizableTimestampPrefixLength(
     text: String,
     lineStart: Int,
     lineEnd: Int,
 ): Int? {
-    if (lineEnd - lineStart < 12) {
+    if (lineEnd - lineStart < 20) {
         return null
     }
-    fun charAt(offset: Int): Char = text[lineStart + offset]
-    fun isDigitAt(offset: Int): Boolean = charAt(offset).isDigit()
-    val dateLooksRight = isDigitAt(0) &&
-        isDigitAt(1) &&
-        isDigitAt(2) &&
-        isDigitAt(3) &&
-        charAt(4) == '-' &&
-        isDigitAt(5) &&
-        isDigitAt(6) &&
-        charAt(7) == '-' &&
-        isDigitAt(8) &&
-        isDigitAt(9)
+
+    fun hasDigit(offset: Int): Boolean =
+        lineStart + offset < lineEnd && text[lineStart + offset].isDigit()
+
+    fun hasChar(offset: Int, expected: Char): Boolean =
+        lineStart + offset < lineEnd && text[lineStart + offset] == expected
+
+    val dateLooksRight = hasDigit(0) &&
+        hasDigit(1) &&
+        hasDigit(2) &&
+        hasDigit(3) &&
+        hasChar(4, '-') &&
+        hasDigit(5) &&
+        hasDigit(6) &&
+        hasChar(7, '-') &&
+        hasDigit(8) &&
+        hasDigit(9)
     if (!dateLooksRight) {
         return null
     }
@@ -3228,30 +3975,45 @@ private fun timestampPrefixLength(
     if (cursor >= lineEnd || text[cursor] != '|') {
         return null
     }
-
-    val maxEnd = minOf(lineEnd, lineStart + NoteTimestampMaxPrefixLength)
-    val afterPipe = (cursor + 1).coerceAtMost(maxEnd)
-    val colonSpace = text.indexOf(": ", startIndex = afterPipe).takeIf { index ->
-        index >= afterPipe && index + 1 < maxEnd
+    cursor += 1
+    while (cursor < lineEnd && text[cursor].isWhitespace() && text[cursor] != '\n') {
+        cursor += 1
     }
-    if (colonSpace != null) {
-        return (colonSpace + 2 - lineStart).coerceAtMost(NoteTimestampMaxPrefixLength)
+    repeat(2) {
+        if (cursor >= lineEnd || !text[cursor].isDigit()) {
+            return null
+        }
+        cursor += 1
     }
-
-    val lastColon = text.lastIndexOf(':', startIndex = maxEnd - 1).takeIf { index ->
-        index >= afterPipe
+    if (cursor >= lineEnd || text[cursor] != ':') {
+        return null
     }
-    if (lastColon != null) {
-        return (lastColon + 1 - lineStart).coerceAtMost(NoteTimestampMaxPrefixLength)
+    cursor += 1
+    repeat(2) {
+        if (cursor >= lineEnd || !text[cursor].isDigit()) {
+            return null
+        }
+        cursor += 1
     }
-
-    val naturalStop = generateSequence(afterPipe) { index ->
-        (index + 1).takeIf { it < maxEnd }
-    }.firstOrNull { index ->
-        text[index].isWhitespace() && index > afterPipe && text.getOrNull(index - 1)?.isLetter() == true
+    while (cursor < lineEnd && text[cursor].isWhitespace() && text[cursor] != '\n') {
+        cursor += 1
     }
-    return ((naturalStop ?: maxEnd) - lineStart)
-        .coerceIn(0, NoteTimestampMaxPrefixLength)
+    val period = text.substring(cursor, minOf(cursor + 2, lineEnd)).uppercase(Locale.ROOT)
+    if (period != "AM" && period != "PM") {
+        return null
+    }
+    cursor += 2
+    while (cursor < lineEnd && text[cursor].isWhitespace() && text[cursor] != '\n') {
+        cursor += 1
+    }
+    if (cursor >= lineEnd || text[cursor] != ':') {
+        return null
+    }
+    cursor += 1
+    if (cursor < lineEnd && text[cursor] == ' ') {
+        cursor += 1
+    }
+    return (cursor - lineStart).coerceAtMost(NoteTimestampMaxPrefixLength)
 }
 
 private fun findTextMatches(
@@ -3287,6 +4049,7 @@ private fun EpubWebView(
     onSwipePrevious: () -> Unit,
     onSwipeNext: () -> Unit,
     onOpenLocalHref: (String) -> Boolean,
+    onOpenExternalLink: (Uri) -> Unit,
     onNoteOpen: (String) -> Unit,
     searchQuery: String,
     searchRequest: Int,
@@ -3349,6 +4112,7 @@ private fun EpubWebView(
                         val targetUrl = request?.url ?: return false
                         val scheme = targetUrl.scheme?.lowercase()
                         if (scheme == "http" || scheme == "https") {
+                            onOpenExternalLink(targetUrl)
                             return true
                         }
 
@@ -3480,6 +4244,30 @@ private data class EpubSearchViewState(
     val request: Int,
 )
 
+private data class EpubRenderCacheKey(
+    val chapterIndex: Int,
+    val themeMode: ReaderThemeMode,
+    val fontChoice: ReaderFontChoice,
+    val fontSizeSp: Int,
+    val lineSpacingBucket: Int,
+)
+
+private fun trimEpubRenderCache(
+    cache: MutableMap<EpubRenderCacheKey, RenderedChapter>,
+    centerKey: EpubRenderCacheKey,
+) {
+    val keepRange = (centerKey.chapterIndex - 1)..(centerKey.chapterIndex + 1)
+    cache.keys
+        .filterNot { key ->
+            key.themeMode == centerKey.themeMode &&
+                key.fontChoice == centerKey.fontChoice &&
+                key.fontSizeSp == centerKey.fontSizeSp &&
+                key.lineSpacingBucket == centerKey.lineSpacingBucket &&
+                key.chapterIndex in keepRange
+        }
+        .forEach { key -> cache.remove(key) }
+}
+
 private fun applyEpubChapterSearch(
     webView: WebView,
     query: String,
@@ -3515,6 +4303,8 @@ private fun ZoomablePage(
     initialScale: Float,
     onScaleChange: (Float) -> Unit,
     onReaderTap: () -> Unit,
+    linkLayer: PdfLinkLayer?,
+    onPdfLink: (PdfLinkTarget) -> Unit,
 ) {
     var scale by rememberSaveable(bitmap.generationId, initialScale) {
         mutableFloatStateOf(initialScale.coerceIn(1f, 5f))
@@ -3556,10 +4346,29 @@ private fun ZoomablePage(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(bitmap.generationId) {
+                .pointerInput(bitmap.generationId, linkLayer, scale, offset) {
                     detectTapGestures(
-                        onTap = {
-                            onReaderTap()
+                        onTap = { position ->
+                            val link = linkLayer?.let { layer ->
+                                viewPointToPdfPoint(
+                                    position = position,
+                                    containerWidth = containerWidth,
+                                    containerHeight = containerHeight,
+                                    baseWidth = baseWidth,
+                                    baseHeight = baseHeight,
+                                    scale = scale,
+                                    offset = offset,
+                                    pageWidth = layer.pageWidth.toFloat(),
+                                    pageHeight = layer.pageHeight.toFloat(),
+                                )?.let { pagePoint ->
+                                    findPdfLinkAt(layer, pagePoint)
+                                }
+                            }
+                            if (link != null) {
+                                onPdfLink(link)
+                            } else {
+                                onReaderTap()
+                            }
                         },
                         onDoubleTap = {
                             scale = 1f
@@ -3581,12 +4390,97 @@ private fun ZoomablePage(
                         scaleY = scale,
                         translationX = offset.x,
                         translationY = offset.y,
-                    ),
+                ),
                 contentScale = ContentScale.FillWidth,
             )
         }
     }
 }
+
+private fun findPdfLinkAt(
+    layer: PdfLinkLayer,
+    pagePoint: Offset,
+): PdfLinkTarget? {
+    val candidatePoints = listOf(
+        pagePoint,
+        Offset(pagePoint.x, layer.pageHeight - pagePoint.y),
+    ).distinct()
+    val hitSlop = (layer.pageWidth * 0.012f).coerceIn(4f, 18f)
+    return candidatePoints.firstNotNullOfOrNull { point ->
+        layer.links.firstOrNull { link ->
+            link.bounds.any { rect -> rect.normalized().expandedBy(hitSlop).contains(point.x, point.y) }
+        }
+    }
+}
+
+private fun trimPdfBitmapCache(
+    cache: MutableMap<Int, Bitmap>,
+    centerPage: Int,
+) {
+    val keepRange = (centerPage - 2)..(centerPage + 2)
+    cache.keys
+        .filterNot { page -> page in keepRange }
+        .forEach { page ->
+            cache.remove(page)?.let { bitmap ->
+                if (!bitmap.isRecycled) {
+                    bitmap.recycle()
+                }
+            }
+        }
+}
+
+private fun viewPointToPdfPoint(
+    position: Offset,
+    containerWidth: Float,
+    containerHeight: Float,
+    baseWidth: Float,
+    baseHeight: Float,
+    scale: Float,
+    offset: Offset,
+    pageWidth: Float,
+    pageHeight: Float,
+): Offset? {
+    val imageRect = transformedPageRect(
+        containerWidth = containerWidth,
+        containerHeight = containerHeight,
+        baseWidth = baseWidth,
+        baseHeight = baseHeight,
+        scale = scale,
+        offset = offset,
+    )
+    if (!imageRect.contains(position.x, position.y)) {
+        return null
+    }
+    val x = ((position.x - imageRect.left) / imageRect.width()).coerceIn(0f, 1f) * pageWidth
+    val y = ((position.y - imageRect.top) / imageRect.height()).coerceIn(0f, 1f) * pageHeight
+    return Offset(x, y)
+}
+
+private fun transformedPageRect(
+    containerWidth: Float,
+    containerHeight: Float,
+    baseWidth: Float,
+    baseHeight: Float,
+    scale: Float,
+    offset: Offset,
+): RectF {
+    val scaledWidth = baseWidth * scale
+    val scaledHeight = baseHeight * scale
+    val left = (containerWidth - scaledWidth) / 2f + offset.x
+    val top = (containerHeight - scaledHeight) / 2f + offset.y
+    return RectF(left, top, left + scaledWidth, top + scaledHeight)
+}
+
+private fun RectF.expandedBy(amount: Float): RectF =
+    RectF(left - amount, top - amount, right + amount, bottom + amount)
+
+private fun RectF.normalized(): RectF =
+    RectF(
+        minOf(left, right),
+        minOf(top, bottom),
+        maxOf(left, right),
+        maxOf(top, bottom),
+    )
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -4161,6 +5055,7 @@ private fun BookRow(
                     DocumentType.EPUB -> Icons.Outlined.ImportContacts
                     DocumentType.PDF -> Icons.Outlined.PictureAsPdf
                     DocumentType.TXT -> Icons.Outlined.Description
+                    DocumentType.FB2 -> Icons.Outlined.LibraryBooks
                 },
                 contentDescription = type.name,
                 tint = if (pinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -4223,36 +5118,45 @@ private fun NotePopup(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        shape = RectangleShape,
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 0.dp,
-        shadowElevation = 0.dp,
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clickable(onClick = onClose),
+        contentAlignment = Alignment.Center,
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+        Surface(
+            modifier = modifier
+                .fillMaxWidth()
+                .clickable { },
+            shape = RectangleShape,
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 0.dp,
+            shadowElevation = 0.dp,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+            Column(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             ) {
-                Text(
-                    text = "Note",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                TextButton(onClick = onClose) {
-                    Text(text = "Close")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Note",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    TextButton(onClick = onClose) {
+                        Text(text = "Close")
+                    }
                 }
+                Text(
+                    text = note,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
             }
-            Text(
-                text = note,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 6.dp),
-            )
         }
     }
 }
@@ -4462,6 +5366,10 @@ private fun buildResumeLabel(
         }
 
         DocumentType.TXT -> null
+        DocumentType.FB2 -> {
+            val percent = (progress.txtScrollFraction.coerceIn(0f, 1f) * 100f).roundToInt()
+            if (percent <= 0) null else "Resume $percent%"
+        }
     }
 }
 

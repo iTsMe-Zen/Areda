@@ -329,6 +329,17 @@ object LibraryRepository {
             }
         }.getOrDefault(null).orEmpty()
 
+    fun readTextLikeDocument(
+        context: Context,
+        document: ReaderDocument,
+    ): String =
+        when (document.type) {
+            DocumentType.TXT -> readText(context, document.uri)
+            DocumentType.FB2 -> LocalTextExtractor.readFb2(context, document.uri)
+            DocumentType.EPUB,
+            DocumentType.PDF -> ""
+        }
+
     fun saveText(
         context: Context,
         uri: Uri,
@@ -690,6 +701,9 @@ object LibraryRepository {
             lowerName.endsWith(".epub") -> DocumentType.EPUB
             lowerName.endsWith(".pdf") -> DocumentType.PDF
             lowerName.endsWith(".txt") -> DocumentType.TXT
+            lowerName.endsWith(".fb2") ||
+                lowerName.endsWith(".fb2.zip") ||
+                lowerName.endsWith(".fbz") -> DocumentType.FB2
             else -> null
         }
     }

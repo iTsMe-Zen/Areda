@@ -31,6 +31,8 @@
                 <data android:mimeType="application/epub+zip" />
                 <data android:mimeType="application/x-epub" />
                 <data android:mimeType="text/plain" />
+                <data android:mimeType="application/x-fictionbook+xml" />
+                <data android:mimeType="application/fb2+xml" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -45,6 +47,9 @@
                     android:scheme="file" />
                 <data
                     android:pathPattern=".*\\.txt"
+                    android:scheme="file" />
+                <data
+                    android:pathPattern=".*\\.fb2"
                     android:scheme="file" />
             </intent-filter>
         </activity>
