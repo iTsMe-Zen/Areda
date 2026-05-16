@@ -27,12 +27,15 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -45,6 +48,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -57,7 +61,9 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -127,6 +133,7 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
@@ -153,6 +160,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.zIndex
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.areada.R
@@ -169,6 +178,7 @@ import app.areada.data.LibrarySortMode
 import app.areada.data.ReaderFontChoice
 import app.areada.data.ReaderPreferences
 import app.areada.data.ReaderRenderPalette
+import app.areada.data.ReaderStateStore
 import app.areada.data.ReadingBookmark
 import app.areada.data.ReaderThemeMode
 import app.areada.data.ReadingProgress
@@ -201,6 +211,37 @@ import kotlin.math.roundToInt
 interface VolumePageTurnHost {
     fun setVolumePageTurnHandler(handler: ((volumeUp: Boolean) -> Boolean)?)
 }
+
+private const val PdfBaseRenderScale = 1f
+private const val PdfBaseRenderScaleBucket = 100
+
+private data class PdfPageBitmapKey(
+    val pageIndex: Int,
+    val renderScaleBucket: Int,
+)
+
+private data class LibraryScrollPosition(
+    val firstVisibleItemIndex: Int,
+    val firstVisibleItemScrollOffset: Int,
+)
+
+private fun pdfRenderScaleForZoom(zoomScale: Float): Float =
+    when {
+        zoomScale <= 1.15f -> 1f
+        zoomScale <= 1.75f -> 1.5f
+        zoomScale <= 2.5f -> 2f
+        else -> 3f
+    }
+
+private fun pdfRenderScaleBucket(renderScale: Float): Int =
+    (renderScale * 100f).roundToInt()
+
+private fun Map<PdfPageBitmapKey, Bitmap>.bestPdfBitmapForPage(pageIndex: Int): Bitmap? =
+    entries
+        .asSequence()
+        .filter { entry -> entry.key.pageIndex == pageIndex }
+        .maxByOrNull { entry -> entry.key.renderScaleBucket }
+        ?.value
 
 @Composable
 fun AreadaApp(
@@ -245,7 +286,30 @@ fun AreadaApp(
         }
     }
 
-    ReaderTheme(mode = uiState.preferences.themeMode) {
+    val startupPreferences = remember(context) {
+        ReaderStateStore.loadPreferences(context)
+    }
+    val startupSafePreferences = remember(startupPreferences, uiState.preferences) {
+        if (uiState.preferences == ReaderPreferences()) startupPreferences else uiState.preferences
+    }
+    val libraryScrollPositions = remember {
+        mutableMapOf<String, LibraryScrollPosition>()
+    }
+    var launchContentSettled by rememberSaveable {
+        mutableStateOf(false)
+    }
+    val launchContentAlpha by animateFloatAsState(
+        targetValue = if (launchContentSettled) 1f else 0.96f,
+        animationSpec = tween(durationMillis = 90),
+        label = "launchContentAlpha",
+    )
+    LaunchedEffect(Unit) {
+        launchContentSettled = true
+    }
+
+    ReaderTheme(mode = startupSafePreferences.themeMode) {
+        AppWindowBackgroundEffect()
+
         if (showExitPrompt) {
             ExitPromptDialog(
                 onDismiss = { showExitPrompt = false },
@@ -257,7 +321,9 @@ fun AreadaApp(
         }
 
         Surface(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer(alpha = launchContentAlpha),
             color = MaterialTheme.colorScheme.background,
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
@@ -279,6 +345,7 @@ fun AreadaApp(
                         fileFilter = uiState.libraryFileFilter,
                         folderDocumentTypesById = uiState.folderDocumentTypesById,
                         progressByUri = uiState.progressByUri,
+                        libraryScrollPositions = libraryScrollPositions,
                         onChooseFolder = { folderPicker.launch(null) },
                         onRefresh = { viewModel.refreshCurrentFolder(context, showLoading = true) },
                         onSelectRoot = { root -> viewModel.selectLibraryRoot(context, root) },
@@ -425,6 +492,7 @@ private fun HomeScreen(
     fileFilter: LibraryFileFilter,
     folderDocumentTypesById: Map<String, Set<DocumentType>>,
     progressByUri: Map<String, ReadingProgress>,
+    libraryScrollPositions: MutableMap<String, LibraryScrollPosition>,
     onChooseFolder: () -> Unit,
     onRefresh: () -> Unit,
     onSelectRoot: (LibraryRoot) -> Unit,
@@ -633,6 +701,63 @@ private fun HomeScreen(
             .lastOrNull { segment -> segment.isNotBlank() }
             ?: "Collection"
     }
+    val libraryScrollKey = remember(
+        selectedRootUriString,
+        currentRelativePath,
+        fileFilter,
+        sortMode,
+    ) {
+        listOf(
+            selectedRootUriString.orEmpty(),
+            currentRelativePath,
+            fileFilter.name,
+            sortMode.name,
+        ).joinToString(separator = "\u001F")
+    }
+
+    key(libraryScrollKey) {
+        val savedScrollPosition = libraryScrollPositions[libraryScrollKey]
+        val libraryListState = rememberLazyListState(
+            initialFirstVisibleItemIndex = savedScrollPosition?.firstVisibleItemIndex ?: 0,
+            initialFirstVisibleItemScrollOffset = savedScrollPosition?.firstVisibleItemScrollOffset ?: 0,
+        )
+        val estimatedLazyItemCount = remember(
+            showReading,
+            visibleRecents,
+            selectedRootUriString,
+            roots,
+            visibleFolders,
+            visibleBooks,
+        ) {
+            var count = 1
+            if (showReading) {
+                count += if (visibleRecents.isEmpty()) 1 else visibleRecents.size
+            }
+            if (selectedRootUriString != null && roots.isNotEmpty()) {
+                count += 1
+                count += visibleFolders.size
+                count += visibleBooks.size
+                if (visibleFolders.isEmpty() && visibleBooks.isEmpty()) {
+                    count += 1
+                }
+            }
+            count.coerceAtLeast(1)
+        }
+
+        DisposableEffect(libraryScrollKey, libraryListState) {
+            onDispose {
+                libraryScrollPositions[libraryScrollKey] = LibraryScrollPosition(
+                    firstVisibleItemIndex = libraryListState.firstVisibleItemIndex,
+                    firstVisibleItemScrollOffset = libraryListState.firstVisibleItemScrollOffset,
+                )
+            }
+        }
+
+        LaunchedEffect(libraryScrollKey, estimatedLazyItemCount) {
+            if (libraryListState.firstVisibleItemIndex >= estimatedLazyItemCount) {
+                libraryListState.scrollToItem(estimatedLazyItemCount - 1)
+            }
+        }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -650,6 +775,7 @@ private fun HomeScreen(
                 },
         ) {
             LazyColumn(
+                state = libraryListState,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(paddingValues)
@@ -973,6 +1099,7 @@ private fun HomeScreen(
         }
     }
 }
+}
 
 
 @Composable
@@ -1005,6 +1132,30 @@ private fun KeepReaderScreenAwake(enabled: Boolean) {
                 window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
         }
+    }
+}
+
+@Composable
+private fun AppWindowBackgroundEffect() {
+    val activity = LocalContext.current.findActivity()
+    val background = MaterialTheme.colorScheme.background
+    val backgroundArgb = background.toArgb()
+    val useLightBars = background.luminance() > 0.5f
+
+    DisposableEffect(activity, backgroundArgb, useLightBars) {
+        val window = activity?.window
+        if (window != null) {
+            window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(backgroundArgb))
+            @Suppress("DEPRECATION")
+            window.statusBarColor = backgroundArgb
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = backgroundArgb
+            WindowCompat.getInsetsController(window, window.decorView).apply {
+                isAppearanceLightStatusBars = useLightBars
+                isAppearanceLightNavigationBars = useLightBars
+            }
+        }
+        onDispose {}
     }
 }
 
@@ -2228,6 +2379,18 @@ private fun EpubReaderScreen(
     ) {
         mutableFloatStateOf(screen.initialScrollFraction)
     }
+    var sectionScrollable by remember(screen.document.uriString, chapterIndex) {
+        mutableStateOf(false)
+    }
+    var scrollRequestId by remember(screen.document.uriString) {
+        mutableIntStateOf(0)
+    }
+    var sectionScrollRequest by remember(screen.document.uriString, chapterIndex) {
+        mutableStateOf<EpubScrollRequest?>(null)
+    }
+    var ignoreScrollCallbacksUntil by remember(screen.document.uriString) {
+        mutableStateOf(0L)
+    }
     var renderedChapter by remember(screen.document.uriString, chapterIndex) {
         mutableStateOf<RenderedChapter?>(null)
     }
@@ -2276,8 +2439,12 @@ private fun EpubReaderScreen(
         if (nextIndex !in screen.book.chapters.indices || nextIndex == chapterIndex) {
             return
         }
-        chapterIndex = nextIndex
+
+        sectionScrollRequest = null
+        sectionScrollable = false
         scrollFraction = 0f
+        chapterIndex = nextIndex
+
         chapterSearchQuery = ""
         chapterSearchCurrent = 0
         chapterSearchCount = 0
@@ -2296,6 +2463,19 @@ private fun EpubReaderScreen(
             return
         }
         switchToChapter(chapterIndex + 1)
+    }
+
+    fun scrubCurrentSection(progress: Float) {
+        val cleanProgress = progress.coerceIn(0f, 1f)
+
+        ignoreScrollCallbacksUntil = SystemClock.uptimeMillis() + 220L
+        scrollFraction = cleanProgress
+
+        scrollRequestId += 1
+        sectionScrollRequest = EpubScrollRequest(
+            id = scrollRequestId,
+            progress = cleanProgress,
+        )
     }
 
     fun openLocalChapterLink(urlString: String): Boolean {
@@ -2440,12 +2620,22 @@ private fun EpubReaderScreen(
                             preferences = preferences,
                             renderPalette = renderPalette,
                             initialScrollFraction = scrollFraction,
+                            scrollRequest = sectionScrollRequest,
                             modifier = Modifier
                                 .fillMaxSize()
-                                .navigationBarsPadding(),
+                                .navigationBarsPadding()
+                                .zIndex(0f),
                             onScrollProgressChange = { progress ->
                                 if (chapterIndex == renderedIndex) {
-                                    scrollFraction = progress
+                                    val now = SystemClock.uptimeMillis()
+                                    if (now >= ignoreScrollCallbacksUntil) {
+                                        scrollFraction = progress
+                                    }
+                                }
+                            },
+                            onScrollabilityChange = { canScroll ->
+                                if (chapterIndex == renderedIndex) {
+                                    sectionScrollable = canScroll
                                 }
                             },
                             onReaderTap = {
@@ -2472,11 +2662,28 @@ private fun EpubReaderScreen(
                 }
             }
 
+            if (renderedChapter != null && sectionScrollable) {
+                EpubSectionScrollThumb(
+                    progressFraction = scrollFraction,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .zIndex(2f)
+                        .fillMaxHeight()
+                        .width(18.dp)
+                        .padding(
+                            top = if (showReaderChrome) 86.dp else 18.dp,
+                            bottom = if (showReaderChrome) 118.dp else 18.dp,
+                            end = 4.dp,
+                        ),
+                )
+            }
+
             if (showReaderChrome) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .fillMaxWidth(),
+                        .fillMaxWidth()
+                        .zIndex(3f),
                 ) {
                     ReaderTopBar(
                         title = screen.document.title,
@@ -2499,18 +2706,24 @@ private fun EpubReaderScreen(
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .fillMaxWidth(),
+                        .fillMaxWidth()
+                        .zIndex(3f),
                 ) {
-                    ReaderFooter(
-                        leftLabel = "Prev",
-                        rightLabel = "Next",
-                        centerLabel = sectionLabel,
-                        leftEnabled = chapterIndex > 0,
-                        rightEnabled = chapterIndex < screen.book.chapters.lastIndex,
-                        onLeft = ::goToPreviousChapter,
-                        onCenter = { showGoToChapter = true },
-                        onRight = ::goToNextChapter,
-                    )
+                    key(screen.document.uriString, chapterIndex) {
+                        ReaderFooter(
+                            leftLabel = "Prev",
+                            rightLabel = "Next",
+                            centerLabel = sectionLabel,
+                            leftEnabled = chapterIndex > 0,
+                            rightEnabled = chapterIndex < screen.book.chapters.lastIndex,
+                            onLeft = ::goToPreviousChapter,
+                            onCenter = { showGoToChapter = true },
+                            onRight = ::goToNextChapter,
+                            progressFraction = scrollFraction,
+                            progressKey = "${screen.document.uriString}#$chapterIndex",
+                            onProgressScrubbed = ::scrubCurrentSection,
+                        )
+                    }
                 }
             }
 
@@ -2659,6 +2872,9 @@ private fun PdfReaderScreen(
     var pendingExternalLink by remember(screen.document.uriString) {
         mutableStateOf<Uri?>(null)
     }
+    var pdfViewResetToken by remember(screen.document.uriString) {
+        mutableIntStateOf(0)
+    }
     val currentBookmarked = bookmarks.any { it.id == pdfBookmarkId(screen.document.uriString, pageIndex) }
     val tocEntries = remember(pageCount) {
         List(pageCount.coerceAtLeast(0)) { index ->
@@ -2691,6 +2907,8 @@ private fun PdfReaderScreen(
             onDismiss = { showGoToPage = false },
             onConfirm = { nextIndex ->
                 onSaveProgress(pageIndex, pageCount, zoomScale)
+                zoomScale = 1f
+                pdfViewResetToken += 1
                 pageIndex = nextIndex
                 showGoToPage = false
             },
@@ -2714,11 +2932,17 @@ private fun PdfReaderScreen(
     }
     val showReaderChrome = !isFullMode || fullControlsVisible
 
+    fun resetPdfView() {
+        zoomScale = 1f
+        pdfViewResetToken += 1
+    }
+
     fun goToPreviousPage() {
         if (pageIndex <= 0) {
             return
         }
         onSaveProgress(pageIndex, pageCount, zoomScale)
+        resetPdfView()
         pageIndex -= 1
     }
 
@@ -2727,6 +2951,7 @@ private fun PdfReaderScreen(
             return
         }
         onSaveProgress(pageIndex, pageCount, zoomScale)
+        resetPdfView()
         pageIndex += 1
     }
 
@@ -2750,13 +2975,15 @@ private fun PdfReaderScreen(
             val density = LocalDensity.current
             val horizontalPaddingPx = with(density) { 32.dp.roundToPx() }
             val widthPx = (constraints.maxWidth - horizontalPaddingPx).coerceAtLeast(1)
+            val desiredRenderScale = pdfRenderScaleForZoom(zoomScale)
+            val desiredBitmapKey = PdfPageBitmapKey(pageIndex, pdfRenderScaleBucket(desiredRenderScale))
             val pageBitmapCache = remember(screen.document.uriString, widthPx) {
-                mutableStateMapOf<Int, Bitmap>()
+                mutableStateMapOf<PdfPageBitmapKey, Bitmap>()
             }
-            var renderError by remember(screen.document.uriString, pageIndex, widthPx) {
+            var renderError by remember(screen.document.uriString, pageIndex, widthPx, desiredBitmapKey) {
                 mutableStateOf<String?>(null)
             }
-            val cachedBitmap = pageBitmapCache[pageIndex]
+            val cachedBitmap = pageBitmapCache[desiredBitmapKey] ?: pageBitmapCache.bestPdfBitmapForPage(pageIndex)
 
             DisposableEffect(pageBitmapCache) {
                 onDispose {
@@ -2769,8 +2996,8 @@ private fun PdfReaderScreen(
                 }
             }
 
-            LaunchedEffect(screen.document.uriString, pageIndex, widthPx) {
-                if (pageBitmapCache[pageIndex] != null) {
+            LaunchedEffect(screen.document.uriString, desiredBitmapKey, widthPx) {
+                if (pageBitmapCache[desiredBitmapKey] != null) {
                     renderError = null
                     return@LaunchedEffect
                 }
@@ -2778,15 +3005,17 @@ private fun PdfReaderScreen(
 
                 runCatching {
                     withContext(Dispatchers.IO) {
-                        renderer.renderPage(pageIndex, widthPx)
+                        renderer.renderPage(pageIndex, widthPx, desiredRenderScale)
                     }
                 }
                     .onSuccess { rendered ->
-                        pageBitmapCache[pageIndex] = rendered
-                        trimPdfBitmapCache(pageBitmapCache, pageIndex)
+                        pageBitmapCache[desiredBitmapKey] = rendered
+                        trimPdfBitmapCache(pageBitmapCache, desiredBitmapKey)
                     }
                     .onFailure { throwable ->
-                        renderError = displayError(throwable, "Unable to render this page.")
+                        if (pageBitmapCache.bestPdfBitmapForPage(pageIndex) == null) {
+                            renderError = displayError(throwable, "Unable to render this page.")
+                        }
                     }
             }
 
@@ -2796,15 +3025,16 @@ private fun PdfReaderScreen(
                 }
                 delay(120)
                 listOf(pageIndex + 1, pageIndex - 1)
-                    .filter { index -> index in 0 until pageCount && pageBitmapCache[index] == null }
+                    .map { index -> PdfPageBitmapKey(index, PdfBaseRenderScaleBucket) }
+                    .filter { key -> key.pageIndex in 0 until pageCount && pageBitmapCache[key] == null }
                     .forEach { neighborIndex ->
                         runCatching {
                             withContext(Dispatchers.IO) {
-                                renderer.renderPage(neighborIndex, widthPx)
+                                renderer.renderPage(neighborIndex.pageIndex, widthPx, PdfBaseRenderScale)
                             }
                         }.onSuccess { rendered ->
                             pageBitmapCache[neighborIndex] = rendered
-                            trimPdfBitmapCache(pageBitmapCache, pageIndex)
+                            trimPdfBitmapCache(pageBitmapCache, desiredBitmapKey)
                         }
                     }
             }
@@ -2873,6 +3103,8 @@ private fun PdfReaderScreen(
                     ) {
                         ZoomablePage(
                             bitmap = pageBitmap,
+                            pageKey = pageIndex,
+                            resetToken = pdfViewResetToken,
                             backgroundColor = MaterialTheme.colorScheme.background,
                             initialScale = zoomScale,
                             onScaleChange = { scale ->
@@ -2887,8 +3119,9 @@ private fun PdfReaderScreen(
                             onPdfLink = { target ->
                                 target.pageIndex?.let { targetPage ->
                                     val safePage = targetPage.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
+                                    onSaveProgress(pageIndex, pageCount, zoomScale)
+                                    resetPdfView()
                                     if (safePage != pageIndex) {
-                                        onSaveProgress(pageIndex, pageCount, zoomScale)
                                         pageIndex = safePage
                                     }
                                     return@ZoomablePage
@@ -4043,8 +4276,10 @@ private fun EpubWebView(
     preferences: ReaderPreferences,
     renderPalette: ReaderRenderPalette,
     initialScrollFraction: Float,
+    scrollRequest: EpubScrollRequest?,
     modifier: Modifier = Modifier,
     onScrollProgressChange: (Float) -> Unit,
+    onScrollabilityChange: (Boolean) -> Unit,
     onReaderTap: () -> Unit,
     onSwipePrevious: () -> Unit,
     onSwipeNext: () -> Unit,
@@ -4057,17 +4292,35 @@ private fun EpubWebView(
     onSearchResult: (current: Int, count: Int) -> Unit,
 ) {
     val backgroundColor = AndroidColor.parseColor(renderPalette.backgroundHex)
+    val latestScrollRequest by rememberUpdatedState(scrollRequest)
     AndroidView(
         factory = { context ->
             WebView(context).apply {
                 var lastProgress = -1f
                 var lastProgressAt = 0L
+                var lastCanScroll: Boolean? = null
                 var lastNoteOpenAt = 0L
                 val openNote: (String) -> Unit = { note ->
                     lastNoteOpenAt = SystemClock.uptimeMillis()
                     onNoteOpen(note)
                 }
+                fun publishScrollState(force: Boolean = false) {
+                    val (progress, canScroll) = epubWebViewScrollState(this)
+                    val now = SystemClock.uptimeMillis()
+                    if (force || abs(progress - lastProgress) >= 0.002f || now - lastProgressAt >= 32L) {
+                        lastProgress = progress
+                        lastProgressAt = now
+                        onScrollProgressChange(progress)
+                    }
+                    if (force || lastCanScroll != canScroll) {
+                        lastCanScroll = canScroll
+                        onScrollabilityChange(canScroll)
+                    }
+                }
                 setBackgroundColor(backgroundColor)
+                isVerticalScrollBarEnabled = false
+                scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
+                isScrollbarFadingEnabled = false
                 settings.javaScriptEnabled = true
                 settings.loadsImagesAutomatically = true
                 settings.blockNetworkLoads = true
@@ -4095,6 +4348,10 @@ private fun EpubWebView(
                 webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView, url: String?) {
                         restoreWebViewScroll(view, initialScrollFraction)
+                        latestScrollRequest?.let { request ->
+                            applyEpubScrollRequest(view, request.progress)
+                        }
+                        view.postDelayed({ publishScrollState(force = true) }, 170L)
                         injectNoteHandler(view)
                         applyEpubChapterSearch(
                             webView = view,
@@ -4151,15 +4408,7 @@ private fun EpubWebView(
                 }
 
                 setOnScrollChangeListener { _, _, scrollY, _, _ ->
-                    val fullHeight = contentHeight * scale
-                    val maxScroll = (fullHeight - height).coerceAtLeast(1f)
-                    val progress = (scrollY / maxScroll).coerceIn(0f, 1f)
-                    val now = SystemClock.uptimeMillis()
-                    if (abs(progress - lastProgress) >= 0.015f || now - lastProgressAt >= 500L) {
-                        lastProgress = progress
-                        lastProgressAt = now
-                        onScrollProgressChange(progress)
-                    }
+                    publishScrollState()
                 }
 
                 val gestureDetector = GestureDetector(
@@ -4218,6 +4467,13 @@ private fun EpubWebView(
             }
         },
         update = { webView ->
+            scrollRequest?.let { request ->
+                val previousRequestId = webView.getTag(R.id.tag_epub_scroll_request_id) as? Int
+                if (previousRequestId != request.id) {
+                    webView.setTag(R.id.tag_epub_scroll_request_id, request.id)
+                    applyEpubScrollRequest(webView, request.progress)
+                }
+            }
             applyEpubChapterSearch(
                 webView = webView,
                 query = searchQuery,
@@ -4242,6 +4498,11 @@ private fun EpubWebView(
 private data class EpubSearchViewState(
     val query: String,
     val request: Int,
+)
+
+private data class EpubScrollRequest(
+    val id: Int,
+    val progress: Float,
 )
 
 private data class EpubRenderCacheKey(
@@ -4299,6 +4560,8 @@ private fun applyEpubChapterSearch(
 @Composable
 private fun ZoomablePage(
     bitmap: Bitmap,
+    pageKey: Int,
+    resetToken: Int,
     backgroundColor: Color,
     initialScale: Float,
     onScaleChange: (Float) -> Unit,
@@ -4306,10 +4569,10 @@ private fun ZoomablePage(
     linkLayer: PdfLinkLayer?,
     onPdfLink: (PdfLinkTarget) -> Unit,
 ) {
-    var scale by rememberSaveable(bitmap.generationId, initialScale) {
+    var scale by rememberSaveable(pageKey, resetToken) {
         mutableFloatStateOf(initialScale.coerceIn(1f, 5f))
     }
-    var offset by remember(bitmap.generationId) {
+    var offset by remember(pageKey, resetToken) {
         mutableStateOf(Offset.Zero)
     }
 
@@ -4346,7 +4609,7 @@ private fun ZoomablePage(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(bitmap.generationId, linkLayer, scale, offset) {
+                .pointerInput(pageKey, linkLayer, scale, offset) {
                     detectTapGestures(
                         onTap = { position ->
                             val link = linkLayer?.let { layer ->
@@ -4414,14 +4677,17 @@ private fun findPdfLinkAt(
 }
 
 private fun trimPdfBitmapCache(
-    cache: MutableMap<Int, Bitmap>,
-    centerPage: Int,
+    cache: MutableMap<PdfPageBitmapKey, Bitmap>,
+    centerKey: PdfPageBitmapKey,
 ) {
-    val keepRange = (centerPage - 2)..(centerPage + 2)
+    val keepRange = (centerKey.pageIndex - 2)..(centerKey.pageIndex + 2)
     cache.keys
-        .filterNot { page -> page in keepRange }
-        .forEach { page ->
-            cache.remove(page)?.let { bitmap ->
+        .filterNot { key ->
+            key.pageIndex in keepRange &&
+                (key.pageIndex == centerKey.pageIndex || key.renderScaleBucket == PdfBaseRenderScaleBucket)
+        }
+        .forEach { key ->
+            cache.remove(key)?.let { bitmap ->
                 if (!bitmap.isRecycled) {
                     bitmap.recycle()
                 }
@@ -4918,6 +5184,9 @@ private fun ReaderFooter(
     onLeft: () -> Unit,
     onCenter: (() -> Unit)? = null,
     onRight: () -> Unit,
+    progressFraction: Float? = null,
+    progressKey: Any? = null,
+    onProgressScrubbed: ((Float) -> Unit)? = null,
 ) {
     Surface(
         color = MaterialTheme.colorScheme.background,
@@ -4929,7 +5198,15 @@ private fun ReaderFooter(
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         ) {
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+            if (progressFraction != null && onProgressScrubbed != null) {
+                ReaderFooterProgressTrack(
+                    progressFraction = progressFraction,
+                    progressKey = progressKey,
+                    onProgressScrubbed = onProgressScrubbed,
+                )
+            } else {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+            }
             Spacer(modifier = Modifier.height(10.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -4973,6 +5250,134 @@ private fun ReaderFooter(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ReaderFooterProgressTrack(
+    progressFraction: Float,
+    progressKey: Any?,
+    onProgressScrubbed: (Float) -> Unit,
+) {
+    val latestOnProgressScrubbed by rememberUpdatedState(onProgressScrubbed)
+    val releaseHandler = remember(progressKey) {
+        Handler(Looper.getMainLooper())
+    }
+    var dragProgress by remember(progressKey) {
+        mutableStateOf<Float?>(null)
+    }
+
+    DisposableEffect(progressKey) {
+        onDispose {
+            releaseHandler.removeCallbacksAndMessages(null)
+        }
+    }
+
+    val shownProgress = (dragProgress ?: progressFraction).coerceIn(0f, 1f)
+    val trackColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.72f)
+    val dotColor = MaterialTheme.colorScheme.primary
+    val handleSize = 10.dp
+
+    fun updateProgress(progress: Float) {
+        val cleanProgress = progress.coerceIn(0f, 1f)
+        releaseHandler.removeCallbacksAndMessages(null)
+        dragProgress = cleanProgress
+        latestOnProgressScrubbed(cleanProgress)
+    }
+
+    fun finishScrub() {
+        val finalProgress = dragProgress
+        if (finalProgress != null) {
+            latestOnProgressScrubbed(finalProgress)
+        }
+
+        releaseHandler.removeCallbacksAndMessages(null)
+        releaseHandler.postDelayed(
+            {
+                dragProgress = null
+            },
+            220L,
+        )
+    }
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(22.dp)
+            .pointerInput(progressKey) {
+                detectDragGestures(
+                    onDragStart = { offset ->
+                        if (size.width > 0) {
+                            updateProgress(offset.x / size.width.toFloat())
+                        }
+                    },
+                    onDrag = { change, _ ->
+                        if (size.width > 0) {
+                            updateProgress(change.position.x / size.width.toFloat())
+                        }
+                        change.consume()
+                    },
+                    onDragCancel = {
+                        releaseHandler.removeCallbacksAndMessages(null)
+                        dragProgress = null
+                    },
+                    onDragEnd = {
+                        finishScrub()
+                    },
+                )
+            },
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        val travel = if (maxWidth > handleSize) maxWidth - handleSize else 0.dp
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(trackColor),
+        )
+        Box(
+            modifier = Modifier
+                .offset(x = travel * shownProgress)
+                .size(handleSize)
+                .background(dotColor, CircleShape),
+        )
+    }
+}
+
+@Composable
+private fun EpubSectionScrollThumb(
+    progressFraction: Float,
+    modifier: Modifier = Modifier,
+) {
+    val animatedProgress by animateFloatAsState(
+        targetValue = progressFraction.coerceIn(0f, 1f),
+        animationSpec = tween(durationMillis = 80),
+        label = "epubSectionScrollThumb",
+    )
+    val backgroundIsDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val thumbColor = if (backgroundIsDark) {
+        Color.White.copy(alpha = 0.48f)
+    } else {
+        Color.Black.copy(alpha = 0.40f)
+    }
+    val thumbHeight = 56.dp
+
+    BoxWithConstraints(
+        modifier = modifier,
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        if (maxHeight <= thumbHeight) {
+            return@BoxWithConstraints
+        }
+        val travel = maxHeight - thumbHeight
+        Box(
+            modifier = Modifier
+                .offset(y = travel * animatedProgress)
+                .width(4.dp)
+                .height(thumbHeight)
+                .background(thumbColor, CircleShape),
+        )
     }
 }
 
@@ -5382,13 +5787,42 @@ private fun restoreWebViewScroll(
     }
 
     val restore = {
-        val fullHeight = (webView.contentHeight * webView.scale).toInt()
-        val maxScroll = (fullHeight - webView.height).coerceAtLeast(0)
-        webView.scrollTo(0, (maxScroll * fraction).roundToInt())
+        scrollWebViewToProgress(webView, fraction)
     }
 
     webView.post(restore)
     webView.postDelayed(restore, 150L)
+}
+
+private fun scrollWebViewToProgress(
+    webView: WebView,
+    progress: Float,
+) {
+    val fullHeight = (webView.contentHeight * webView.scale).toInt()
+    val maxScroll = (fullHeight - webView.height).coerceAtLeast(0)
+    val targetY = (maxScroll * progress.coerceIn(0f, 1f)).roundToInt()
+    webView.scrollTo(webView.scrollX, targetY)
+}
+
+private fun applyEpubScrollRequest(
+    webView: WebView,
+    progress: Float,
+) {
+    val scroll = {
+        scrollWebViewToProgress(webView, progress)
+    }
+    scroll()
+    webView.post(scroll)
+    webView.postDelayed(scroll, 80L)
+}
+
+private fun epubWebViewScrollState(webView: WebView): Pair<Float, Boolean> {
+    val fullHeight = webView.contentHeight * webView.scale
+    val maxScroll = (fullHeight - webView.height).coerceAtLeast(0f)
+    if (maxScroll <= 1f) {
+        return 0f to false
+    }
+    return (webView.scrollY / maxScroll).coerceIn(0f, 1f) to true
 }
 
 private fun resetWebViewZoom(webView: WebView) {

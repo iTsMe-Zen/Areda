@@ -153,6 +153,11 @@ object EpubEngine {
         val fontSize = preferences.fontSizeSp.coerceIn(14, 30)
         val lineSpacing = preferences.lineSpacing.coerceIn(1.2f, 2.4f)
         val colorScheme = if (preferences.themeMode == ReaderThemeMode.DARK) "dark" else "light"
+        val scrollThumbColor = if (preferences.themeMode == ReaderThemeMode.DARK) {
+            "#F5F1E866"
+        } else {
+            "#2B231A66"
+        }
         val normalizedDocument = parseChapterDocument(chapter.file, baseUrl)
         AreadaCacheManager.withCacheLock {
             ensureReferencedAssets(book, chapter, normalizedDocument)
@@ -196,6 +201,17 @@ object EpubEngine {
               padding: 76px 18px 132px;
               word-break: break-word;
               overflow-wrap: anywhere;
+            }
+            ::-webkit-scrollbar {
+              width: 6px;
+              height: 6px;
+            }
+            ::-webkit-scrollbar-track {
+              background: transparent;
+            }
+            ::-webkit-scrollbar-thumb {
+              background-color: $scrollThumbColor;
+              border-radius: 999px;
             }
             body * {
               box-sizing: border-box;

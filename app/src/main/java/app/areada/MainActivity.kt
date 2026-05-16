@@ -1,12 +1,18 @@
 package app.areada
 
 import android.content.Intent
+import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.view.WindowCompat
+import app.areada.data.ReaderStateStore
+import app.areada.data.ReaderThemeMode
 import androidx.compose.runtime.mutableStateOf
 import app.areada.ui.AreadaApp
 import app.areada.ui.VolumePageTurnHost
@@ -19,6 +25,7 @@ class MainActivity : ComponentActivity(), VolumePageTurnHost {
         super.onCreate(savedInstanceState)
         externalOpenUri.value = viewUriFrom(intent)
         enableEdgeToEdge()
+        applyLaunchWindowColors()
         setContent {
             AreadaApp(
                 externalOpenUri = externalOpenUri.value,
@@ -62,4 +69,32 @@ class MainActivity : ComponentActivity(), VolumePageTurnHost {
             else -> null
         }
     }
+
+    private fun applyLaunchWindowColors() {
+        val themeMode = ReaderStateStore.loadPreferences(this).themeMode
+        val dark = themeMode == ReaderThemeMode.DARK ||
+            (themeMode == ReaderThemeMode.ANDROID && isSystemInDarkMode())
+        val background = when (themeMode) {
+            ReaderThemeMode.DARK -> Color.rgb(0x0F, 0x0F, 0x10)
+            ReaderThemeMode.SEPIA -> Color.rgb(0xF3, 0xE7, 0xCF)
+            ReaderThemeMode.SAGE -> Color.rgb(0xEE, 0xF4, 0xEA)
+            ReaderThemeMode.BLUSH -> Color.rgb(0xF8, 0xEE, 0xF1)
+            ReaderThemeMode.ANDROID -> if (dark) {
+                Color.rgb(0x0F, 0x0F, 0x10)
+            } else {
+                Color.rgb(0xF4, 0xF2, 0xEB)
+            }
+            ReaderThemeMode.LIGHT -> Color.rgb(0xF4, 0xF2, 0xEB)
+        }
+        window.setBackgroundDrawable(ColorDrawable(background))
+        window.statusBarColor = background
+        window.navigationBarColor = background
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = !dark
+            isAppearanceLightNavigationBars = !dark
+        }
+    }
+
+    private fun isSystemInDarkMode(): Boolean =
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 }

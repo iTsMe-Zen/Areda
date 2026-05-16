@@ -1,0 +1,19 @@
+Improved PDF zoom rendering so text stays sharper while zooming.
+Improved PDF internal link navigation where supported.
+Fixed PDF zoom and gesture state after internal link navigation.
+Kept PDF external links behind the Open link? confirmation prompt.
+Improved PDF renderer fallback behavior and error handling.
+
+Improved EPUB current-section scrubber reliability after section changes.
+Added live EPUB scrubber scrolling while dragging.
+Smoothed EPUB scrubber release behavior.
+Smoothed EPUB vertical scrollbar movement.
+Improved EPUB reader scroll controls.
+Preserved reader fullscreen and non-fullscreen behavior when changing EPUB sections.
+
+Fixed Home search focus so the keyboard stays open while typing.
+Preserved folder scroll position when returning from subfolders or opened files.
+Smoothed dark/light theme transition after splash on some devices.
+Improved library navigation polish and dark-theme startup consistency.
+
+Kept Areada offline-first with no internet permission.

@@ -1,3 +1,4 @@
 <resources>
     <item name="tag_epub_search_state" type="id" />
+    <item name="tag_epub_scroll_request_id" type="id" />
 </resources>
