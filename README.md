@@ -14,7 +14,7 @@ Areada supports EPUB, PDF, TXT, and FB2 files, with a clean monochrome interface
 
 ## Latest Release
 
-Latest version: **v1.0.8**
+Latest version: **v1.0.9**
 
 <p>
   <a href="https://github.com/iTsMe-Zen/Areada/releases/latest">
