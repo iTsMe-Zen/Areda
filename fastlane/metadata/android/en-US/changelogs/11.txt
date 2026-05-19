@@ -1,0 +1,10 @@
+Areada 1.1.0 is a large cleanup and polish update.
+
+- Cleaner Home screen with Books, Reading, and Bookmarks tabs.
+- ZIP support for EPUB, PDF, TXT, and FB2 files inside .zip archives.
+- Sectioned plain-TXT notes and reader-only Book Notes.
+- Reader Orientation and reading ruler controls.
+- Better sorting, filtering, empty states, and row metadata.
+- Localization groundwork with language settings and draft Nepali resources.
+- Improved TXT encoding and FB2/FBZ handling.
+- Internal refactoring and more JVM tests for safer future updates.

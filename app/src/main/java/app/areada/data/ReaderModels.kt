@@ -7,6 +7,7 @@ enum class DocumentType {
     PDF,
     TXT,
     FB2,
+    ZIP,
 }
 
 data class ReaderDocument(
@@ -21,4 +22,9 @@ data class RecentDocument(
     val title: String,
     val type: DocumentType,
     val lastOpenedAt: Long,
+)
+
+data class TextDocumentContent(
+    val text: String,
+    val title: String? = null,
 )

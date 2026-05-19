@@ -1,4 +1,4 @@
-package app.areada.data
+package app.areada.reader.fb2
 
 import android.content.Context
 import android.net.Uri
@@ -15,11 +15,23 @@ object LocalTextExtractor {
         context: Context,
         uri: Uri,
     ): String =
+        readFb2Document(context, uri).text
+
+    fun readFb2Document(
+        context: Context,
+        uri: Uri,
+    ): LocalFb2Document =
         context.contentResolver.openInputStream(uri)?.use { input ->
             parseFb2OrZip(input)
-        }.orEmpty()
+        } ?: throw IllegalArgumentException("Unable to read that FB2.")
 
-    private fun parseFb2OrZip(input: InputStream): String {
+    internal fun extractFb2Text(input: InputStream): String =
+        parseFb2OrZip(input).text
+
+    internal fun extractFb2Document(input: InputStream): LocalFb2Document =
+        parseFb2OrZip(input)
+
+    private fun parseFb2OrZip(input: InputStream): LocalFb2Document {
         val buffered = BufferedInputStream(input)
         buffered.mark(4)
         val first = buffered.read()
@@ -35,12 +47,12 @@ object LocalTextExtractor {
                     zip.closeEntry()
                 }
             }
-            return ""
+            return LocalFb2Document()
         }
         return parseFb2(buffered)
     }
 
-    private fun parseFb2(input: InputStream): String {
+    private fun parseFb2(input: InputStream): LocalFb2Document {
         val factory = DocumentBuilderFactory.newInstance().apply {
             isNamespaceAware = false
             isExpandEntityReferences = false
@@ -51,8 +63,10 @@ object LocalTextExtractor {
         }
         val document = factory.newDocumentBuilder().parse(input)
         val builder = StringBuilder()
+        val title = firstElementText(document, "book-title")
+        val author = firstAuthorName(document)
 
-        firstElementText(document, "book-title")?.let { title ->
+        title?.let { title ->
             appendBlock(builder, title)
         }
         val bodies = document.getElementsByTagName("body")
@@ -64,7 +78,11 @@ object LocalTextExtractor {
             }
         }
 
-        return builder.toString().trim().take(MAX_EXTRACTED_CHARS)
+        return LocalFb2Document(
+            text = builder.toString().trim().take(MAX_EXTRACTED_CHARS),
+            title = title,
+            author = author,
+        )
     }
 
     private fun appendFb2Children(
@@ -91,14 +109,66 @@ object LocalTextExtractor {
         document: org.w3c.dom.Document,
         tagName: String,
     ): String? {
-        val nodes = document.getElementsByTagName(tagName)
-        for (index in 0 until nodes.length) {
-            val text = nodes.item(index).textContent.orEmpty().compactWhitespace()
+        forEachElementByLocalName(document, tagName) { node ->
+            val text = node.textContent.orEmpty().compactWhitespace()
             if (text.isNotBlank()) {
                 return text
             }
         }
         return null
+    }
+
+    private fun firstAuthorName(document: org.w3c.dom.Document): String? {
+        forEachElementByLocalName(document, "author") { authorNode ->
+            val parts = listOf("first-name", "middle-name", "last-name")
+                .mapNotNull { tagName -> firstChildElementText(authorNode, tagName) }
+            val fullName = parts.joinToString(" ").compactWhitespace()
+            if (fullName.isNotBlank()) {
+                return fullName
+            }
+
+            val nickname = firstChildElementText(authorNode, "nickname")
+            if (!nickname.isNullOrBlank()) {
+                return nickname
+            }
+
+            val fallback = authorNode.textContent.orEmpty().compactWhitespace()
+            if (fallback.isNotBlank()) {
+                return fallback
+            }
+        }
+        return null
+    }
+
+    private fun firstChildElementText(
+        node: Node,
+        tagName: String,
+    ): String? {
+        val children = node.childNodes
+        for (index in 0 until children.length) {
+            val child = children.item(index)
+            if (child.nodeName.substringAfter(':').equals(tagName, ignoreCase = true)) {
+                val text = child.textContent.orEmpty().compactWhitespace()
+                if (text.isNotBlank()) {
+                    return text
+                }
+            }
+        }
+        return null
+    }
+
+    private inline fun forEachElementByLocalName(
+        document: org.w3c.dom.Document,
+        tagName: String,
+        block: (Node) -> Unit,
+    ) {
+        val nodes = document.getElementsByTagName("*")
+        for (index in 0 until nodes.length) {
+            val node = nodes.item(index)
+            if (node.nodeName.substringAfter(':').equals(tagName, ignoreCase = true)) {
+                block(node)
+            }
+        }
     }
 
     private fun appendBlock(
@@ -127,3 +197,10 @@ object LocalTextExtractor {
     private fun StringBuilder.endsWith(suffix: String): Boolean =
         length >= suffix.length && substring(length - suffix.length, length) == suffix
 }
+
+data class LocalFb2Document(
+    val text: String = "",
+    val title: String? = null,
+    val author: String? = null,
+)
+

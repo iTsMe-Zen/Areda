@@ -65,8 +65,29 @@ class MainActivity : ComponentActivity(), VolumePageTurnHost {
         }
         val uri = intent.data ?: return null
         return when (uri.scheme?.lowercase()) {
-            "content", "file" -> uri
+            "content", "file" -> {
+                persistIncomingReadPermission(intent, uri)
+                uri
+            }
             else -> null
+        }
+    }
+
+    private fun persistIncomingReadPermission(
+        intent: Intent,
+        uri: Uri,
+    ) {
+        if (uri.scheme?.lowercase() != "content") {
+            return
+        }
+        if (intent.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0) {
+            return
+        }
+        runCatching {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
         }
     }
 

@@ -9,6 +9,7 @@ build/
 
 # Local machine files
 local.properties
+/docs/
 
 # Signing keys - NEVER upload these
 *.jks

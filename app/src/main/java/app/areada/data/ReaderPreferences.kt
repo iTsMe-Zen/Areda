@@ -1,5 +1,7 @@
 package app.areada.data
 
+import kotlin.math.roundToInt
+
 enum class ReaderThemeMode(val label: String) {
     LIGHT("Day"),
     SEPIA("Sepia"),
@@ -18,15 +20,56 @@ enum class ReaderFontChoice(
     MONO("Mono", "ui-monospace, 'SFMono-Regular', 'Cascadia Mono', 'Courier New', monospace"),
 }
 
+enum class ReaderOrientationMode(val label: String) {
+    Portrait("Portrait"),
+    Landscape("Landscape"),
+    FollowSystem("Follow System"),
+}
+
+fun readerOrientationModeFromName(name: String?): ReaderOrientationMode =
+    ReaderOrientationMode.entries.firstOrNull { mode -> mode.name == name } ?: ReaderOrientationMode.FollowSystem
+
+enum class ReaderLanguageMode(
+    val localeTag: String?,
+) {
+    System(null),
+    English("en"),
+    Nepali("ne"),
+}
+
+fun readerLanguageModeFromName(name: String?): ReaderLanguageMode =
+    ReaderLanguageMode.entries.firstOrNull { mode -> mode.name == name } ?: ReaderLanguageMode.System
+
+const val ReaderRulerPositionDefault = 0.50f
+const val ReaderRulerPositionMin = 0.15f
+const val ReaderRulerPositionMax = 0.85f
+
 data class ReaderPreferences(
     val themeMode: ReaderThemeMode = ReaderThemeMode.LIGHT,
     val fontChoice: ReaderFontChoice = ReaderFontChoice.SERIF,
+    val languageMode: ReaderLanguageMode = ReaderLanguageMode.System,
+    val orientationMode: ReaderOrientationMode = ReaderOrientationMode.FollowSystem,
     val fontSizeSp: Int = 18,
     val lineSpacing: Float = 1.7f,
     val keepScreenOn: Boolean = false,
     val volumeButtonsTurnPages: Boolean = false,
     val invertVolumeButtons: Boolean = false,
+    val readingRuler: Boolean = false,
+    val readingRulerPosition: Float = ReaderRulerPositionDefault,
 )
+
+fun sanitizeReaderPreferences(preferences: ReaderPreferences): ReaderPreferences =
+    preferences.copy(
+        fontSizeSp = preferences.fontSizeSp.coerceIn(14, 30),
+        lineSpacing = preferences.lineSpacing.coerceIn(1.2f, 2.4f),
+        readingRulerPosition = sanitizeReadingRulerPosition(preferences.readingRulerPosition),
+    )
+
+fun sanitizeReadingRulerPosition(position: Float): Float =
+    ((position * 20f).roundToInt() / 20f).coerceIn(ReaderRulerPositionMin, ReaderRulerPositionMax)
+
+fun readingRulerPositionLabel(position: Float): String =
+    "${(sanitizeReadingRulerPosition(position) * 100f).roundToInt()}%"
 
 data class ReaderRenderPalette(
     val backgroundHex: String,

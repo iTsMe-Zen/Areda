@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import app.areada.R
 
 object DocumentResolver {
     fun resolve(context: Context, uri: Uri): ReaderDocument {
@@ -13,7 +14,7 @@ object DocumentResolver {
             ?: "Untitled"
         val documentType = detectSupportedType(null, displayName)
             ?: detectSupportedType(runCatching { contentResolver.getType(uri) }.getOrNull(), displayName)
-            ?: error("Only EPUB, PDF, TXT, and FB2 files are supported.")
+            ?: error(context.getString(R.string.unsupported_file_type))
         val title = displayName.substringBeforeLast('.', displayName).ifBlank { displayName }
 
         return ReaderDocument(
@@ -42,6 +43,9 @@ object DocumentResolver {
                 lowerName.endsWith(".fb2") ||
                 lowerName.endsWith(".fb2.zip") ||
                 lowerName.endsWith(".fbz") -> DocumentType.FB2
+            normalizedMime == "application/zip" ||
+                normalizedMime == "application/x-zip-compressed" ||
+                lowerName.endsWith(".zip") -> DocumentType.ZIP
             else -> null
         }
     }

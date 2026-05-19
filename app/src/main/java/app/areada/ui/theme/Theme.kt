@@ -1,18 +1,25 @@
 package app.areada.ui.theme
 
+import android.app.Activity
+import android.graphics.drawable.ColorDrawable
 import android.os.Build
+import android.view.View
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Shapes
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.dp
 import app.areada.data.ReaderThemeMode
 
 private val LightReaderColors = lightColorScheme(
@@ -99,7 +106,9 @@ fun ReaderTheme(
     content: @Composable () -> Unit,
 ) {
     val context = LocalContext.current
+    val view = LocalView.current
     val useDarkSystem = isSystemInDarkTheme()
+
     val colors = when (mode) {
         ReaderThemeMode.LIGHT -> LightReaderColors
         ReaderThemeMode.SEPIA -> SepiaReaderColors
@@ -111,6 +120,42 @@ fun ReaderTheme(
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> dynamicLightColorScheme(context)
             useDarkSystem -> DarkReaderColors
             else -> LightReaderColors
+        }
+    }
+
+    val backgroundArgb = colors.background.toArgb()
+    val useDarkSystemBarIcons = colors.background.luminance() > 0.5f
+
+    if (!view.isInEditMode) {
+        SideEffect {
+            val activity = context as? Activity ?: return@SideEffect
+            val window = activity.window
+
+            window.setBackgroundDrawable(ColorDrawable(backgroundArgb))
+            window.statusBarColor = backgroundArgb
+            window.navigationBarColor = backgroundArgb
+
+            var flags = view.systemUiVisibility
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                flags = if (useDarkSystemBarIcons) {
+                    flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                } else {
+                    flags and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
+                }
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                flags = if (useDarkSystemBarIcons) {
+                    flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+                } else {
+                    flags and View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()
+                }
+
+                window.navigationBarDividerColor = backgroundArgb
+            }
+
+            view.systemUiVisibility = flags
         }
     }
 

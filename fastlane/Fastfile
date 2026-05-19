@@ -1,0 +1,21 @@
+default_platform(:android)
+
+platform :android do
+  # Local verification only. Release export, signing, publishing, pushing, and tagging are manual for now.
+
+  desc "Run JVM unit tests"
+  lane :test do
+    gradle(task: "test")
+  end
+
+  desc "Assemble the debug build"
+  lane :assemble_debug do
+    gradle(task: "assembleDebug")
+  end
+
+  desc "Run local verification without creating release artifacts"
+  lane :verify do
+    test
+    assemble_debug
+  end
+end

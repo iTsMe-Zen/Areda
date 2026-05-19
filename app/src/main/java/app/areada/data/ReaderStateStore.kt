@@ -10,9 +10,15 @@ object ReaderStateStore {
     private const val KEY_READING_PROGRESS = "reading_progress"
     private const val KEY_LIBRARY_ROOTS = "library_roots"
     private const val KEY_LIBRARY_SORT_MODE = "library_sort_mode"
+    private const val KEY_LIBRARY_FILE_FILTER = "library_file_filter"
+    private const val KEY_HOME_TAB = "home_tab"
     private const val KEY_PINNED_LIBRARY_ITEMS = "pinned_library_items"
     private const val KEY_LIBRARY_ADDED_AT = "library_added_at"
     private const val KEY_BOOKMARKS = "bookmarks"
+    private const val KEY_BOOK_STATUSES = "book_statuses"
+    private const val KEY_NOTE_DOCUMENT_IDS = "note_document_ids"
+    private const val KEY_BOOK_NOTE_LINKS = "book_note_links"
+    private const val KEY_NOTE_LAST_SECTIONS = "note_last_sections"
 
     fun loadPreferences(context: Context): ReaderPreferences {
         val payload = context
@@ -22,43 +28,229 @@ object ReaderStateStore {
 
         return runCatching {
             val item = JSONObject(payload)
-            ReaderPreferences(
-                themeMode = ReaderThemeMode.entries.firstOrNull { it.name == item.optString("themeMode") }
-                    ?: ReaderPreferences().themeMode,
-                fontChoice = ReaderFontChoice.entries.firstOrNull { it.name == item.optString("fontChoice") }
-                    ?: ReaderPreferences().fontChoice,
-                fontSizeSp = item.optInt("fontSizeSp", ReaderPreferences().fontSizeSp).coerceIn(14, 30),
-                lineSpacing = item.optDouble("lineSpacing", ReaderPreferences().lineSpacing.toDouble())
-                    .toFloat()
-                    .coerceIn(1.2f, 2.4f),
-                keepScreenOn = item.optBoolean("keepScreenOn", ReaderPreferences().keepScreenOn),
-                volumeButtonsTurnPages = item.optBoolean(
-                    "volumeButtonsTurnPages",
-                    ReaderPreferences().volumeButtonsTurnPages,
-                ),
-                invertVolumeButtons = item.optBoolean(
-                    "invertVolumeButtons",
-                    ReaderPreferences().invertVolumeButtons,
+            sanitizeReaderPreferences(
+                ReaderPreferences(
+                    themeMode = ReaderThemeMode.entries.firstOrNull { it.name == item.optString("themeMode") }
+                        ?: ReaderPreferences().themeMode,
+                    fontChoice = ReaderFontChoice.entries.firstOrNull { it.name == item.optString("fontChoice") }
+                        ?: ReaderPreferences().fontChoice,
+                    languageMode = readerLanguageModeFromName(item.optString("languageMode")),
+                    orientationMode = readerOrientationModeFromName(item.optString("orientationMode")),
+                    fontSizeSp = item.optInt("fontSizeSp", ReaderPreferences().fontSizeSp),
+                    lineSpacing = item.optDouble("lineSpacing", ReaderPreferences().lineSpacing.toDouble())
+                        .toFloat(),
+                    keepScreenOn = item.optBoolean("keepScreenOn", ReaderPreferences().keepScreenOn),
+                    volumeButtonsTurnPages = item.optBoolean(
+                        "volumeButtonsTurnPages",
+                        ReaderPreferences().volumeButtonsTurnPages,
+                    ),
+                    invertVolumeButtons = item.optBoolean(
+                        "invertVolumeButtons",
+                        ReaderPreferences().invertVolumeButtons,
+                    ),
+                    readingRuler = item.optBoolean(
+                        "readingRuler",
+                        item.optDouble("readingRulerStrength", 0.0) > 0.0,
+                    ),
+                    readingRulerPosition = item.optDouble(
+                        "readingRulerPosition",
+                        item.optDouble("readingRulerStrength", ReaderRulerPositionDefault.toDouble()),
+                    ).toFloat(),
                 ),
             )
         }.getOrDefault(ReaderPreferences())
     }
 
     fun savePreferences(context: Context, preferences: ReaderPreferences) {
+        val sanitized = sanitizeReaderPreferences(preferences)
         val payload = JSONObject().apply {
-            put("themeMode", preferences.themeMode.name)
-            put("fontChoice", preferences.fontChoice.name)
-            put("fontSizeSp", preferences.fontSizeSp.coerceIn(14, 30))
-            put("lineSpacing", preferences.lineSpacing.coerceIn(1.2f, 2.4f).toDouble())
-            put("keepScreenOn", preferences.keepScreenOn)
-            put("volumeButtonsTurnPages", preferences.volumeButtonsTurnPages)
-            put("invertVolumeButtons", preferences.invertVolumeButtons)
+            put("themeMode", sanitized.themeMode.name)
+            put("fontChoice", sanitized.fontChoice.name)
+            put("languageMode", sanitized.languageMode.name)
+            put("orientationMode", sanitized.orientationMode.name)
+            put("fontSizeSp", sanitized.fontSizeSp)
+            put("lineSpacing", sanitized.lineSpacing.toDouble())
+            put("keepScreenOn", sanitized.keepScreenOn)
+            put("volumeButtonsTurnPages", sanitized.volumeButtonsTurnPages)
+            put("invertVolumeButtons", sanitized.invertVolumeButtons)
+            put("readingRuler", sanitized.readingRuler)
+            put("readingRulerPosition", sanitized.readingRulerPosition.toDouble())
         }
 
         context
             .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_READER_PREFERENCES, payload.toString())
+            .apply()
+    }
+
+    fun loadBookStatuses(context: Context): Map<String, BookStatus> {
+        val payload = context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_BOOK_STATUSES, null)
+            ?: return emptyMap()
+
+        return runCatching {
+            buildMap {
+                val item = JSONObject(payload)
+                item.keys().forEach { uriString ->
+                    if (uriString.isBlank()) {
+                        return@forEach
+                    }
+                    bookStatusFromName(item.optString(uriString))?.let { status ->
+                        put(uriString, status)
+                    }
+                }
+            }
+        }.getOrDefault(emptyMap())
+    }
+
+    fun saveBookStatuses(
+        context: Context,
+        statusesByUri: Map<String, BookStatus>,
+    ) {
+        val payload = JSONObject()
+        statusesByUri
+            .toSortedMap()
+            .forEach { (uriString, status) ->
+                if (uriString.isNotBlank()) {
+                    payload.put(uriString, status.name)
+                }
+            }
+
+        context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_BOOK_STATUSES, payload.toString())
+            .apply()
+    }
+
+    fun loadNoteDocumentIds(context: Context): Set<String> {
+        val payload = context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_NOTE_DOCUMENT_IDS, null)
+            ?: return emptySet()
+
+        return runCatching {
+            buildSet {
+                val items = JSONArray(payload)
+                repeat(items.length()) { index ->
+                    val id = items.optString(index)
+                    if (id.isNotBlank()) {
+                        add(id)
+                    }
+                }
+            }
+        }.getOrDefault(emptySet())
+    }
+
+    fun saveNoteDocumentIds(
+        context: Context,
+        noteDocumentIds: Set<String>,
+    ) {
+        val payload = JSONArray()
+        noteDocumentIds.sorted().forEach { id ->
+            if (id.isNotBlank()) {
+                payload.put(id)
+            }
+        }
+
+        context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_NOTE_DOCUMENT_IDS, payload.toString())
+            .apply()
+    }
+
+    fun loadBookNoteLinks(context: Context): Map<String, BookNoteLink> {
+        val payload = context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_BOOK_NOTE_LINKS, null)
+            ?: return emptyMap()
+
+        return runCatching {
+            buildMap {
+                val item = JSONObject(payload)
+                item.keys().forEach { bookUriString ->
+                    val link = item.optJSONObject(bookUriString) ?: return@forEach
+                    val noteUriString = link.optString("noteUri")
+                    if (bookUriString.isNotBlank() && noteUriString.isNotBlank()) {
+                        put(
+                            bookUriString,
+                            BookNoteLink(
+                                bookUriString = bookUriString,
+                                noteUriString = noteUriString,
+                                noteTitle = link.optString("noteTitle").ifBlank { "Book Note" },
+                            ),
+                        )
+                    }
+                }
+            }
+        }.getOrDefault(emptyMap())
+    }
+
+    fun saveBookNoteLinks(
+        context: Context,
+        linksByBookUri: Map<String, BookNoteLink>,
+    ) {
+        val payload = JSONObject()
+        linksByBookUri
+            .toSortedMap()
+            .forEach { (bookUriString, link) ->
+                if (bookUriString.isNotBlank() && link.noteUriString.isNotBlank()) {
+                    payload.put(
+                        bookUriString,
+                        JSONObject().apply {
+                            put("noteUri", link.noteUriString)
+                            put("noteTitle", link.noteTitle)
+                        },
+                    )
+                }
+            }
+
+        context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_BOOK_NOTE_LINKS, payload.toString())
+            .apply()
+    }
+
+    fun loadLastNoteSections(context: Context): Map<String, String> {
+        val payload = context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_NOTE_LAST_SECTIONS, null)
+            ?: return emptyMap()
+
+        return runCatching {
+            buildMap {
+                val item = JSONObject(payload)
+                item.keys().forEach { noteUriString ->
+                    val sectionTitle = item.optString(noteUriString)
+                    if (noteUriString.isNotBlank() && sectionTitle.isNotBlank()) {
+                        put(noteUriString, sectionTitle)
+                    }
+                }
+            }
+        }.getOrDefault(emptyMap())
+    }
+
+    fun saveLastNoteSections(
+        context: Context,
+        lastSectionsByNoteUri: Map<String, String>,
+    ) {
+        val payload = JSONObject()
+        lastSectionsByNoteUri
+            .toSortedMap()
+            .forEach { (noteUriString, sectionTitle) ->
+                if (noteUriString.isNotBlank() && sectionTitle.isNotBlank()) {
+                    payload.put(noteUriString, sectionTitle)
+                }
+            }
+
+        context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_NOTE_LAST_SECTIONS, payload.toString())
             .apply()
     }
 
@@ -197,6 +389,42 @@ object ReaderStateStore {
             .apply()
     }
 
+    fun loadLibraryFileFilter(context: Context): LibraryFileFilter {
+        val savedName = context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_LIBRARY_FILE_FILTER, null)
+        return LibraryFileFilter.entries.firstOrNull { it.name == savedName } ?: LibraryFileFilter.ALL
+    }
+
+    fun saveLibraryFileFilter(
+        context: Context,
+        filter: LibraryFileFilter,
+    ) {
+        context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_LIBRARY_FILE_FILTER, filter.name)
+            .apply()
+    }
+
+    fun loadHomeTabName(context: Context): String =
+        context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_HOME_TAB, null)
+            ?.takeIf { it.isNotBlank() }
+            ?: "Collection"
+
+    fun saveHomeTabName(
+        context: Context,
+        tabName: String,
+    ) {
+        context
+            .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_HOME_TAB, tabName)
+            .apply()
+    }
+
     fun loadPinnedLibraryItemIds(context: Context): Set<String> {
         val payload = context
             .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
@@ -308,7 +536,7 @@ object ReaderStateStore {
                         ),
                     )
                 }
-            }.sortedByDescending { it.updatedAt }
+            }
         }.getOrDefault(emptyList())
     }
 
@@ -317,28 +545,26 @@ object ReaderStateStore {
         bookmarks: List<ReadingBookmark>,
     ) {
         val payload = JSONArray()
-        bookmarks
-            .sortedByDescending { it.updatedAt }
-            .forEach { bookmark ->
-                payload.put(
-                    JSONObject().apply {
-                        put("id", bookmark.id)
-                        put("uri", bookmark.uriString)
-                        put("title", bookmark.title)
-                        put("type", bookmark.type.name)
-                        put("positionLabel", bookmark.positionLabel)
-                        put("epubChapterIndex", bookmark.epubChapterIndex)
-                        put("epubChapterCount", bookmark.epubChapterCount)
-                        put("epubChapterTitle", bookmark.epubChapterTitle)
-                        put("epubScrollFraction", bookmark.epubScrollFraction)
-                        put("pdfPageIndex", bookmark.pdfPageIndex)
-                        put("pdfPageCount", bookmark.pdfPageCount)
-                        put("txtScrollFraction", bookmark.txtScrollFraction)
-                        put("createdAt", bookmark.createdAt)
-                        put("updatedAt", bookmark.updatedAt)
-                    },
-                )
-            }
+        bookmarks.forEach { bookmark ->
+            payload.put(
+                JSONObject().apply {
+                    put("id", bookmark.id)
+                    put("uri", bookmark.uriString)
+                    put("title", bookmark.title)
+                    put("type", bookmark.type.name)
+                    put("positionLabel", bookmark.positionLabel)
+                    put("epubChapterIndex", bookmark.epubChapterIndex)
+                    put("epubChapterCount", bookmark.epubChapterCount)
+                    put("epubChapterTitle", bookmark.epubChapterTitle)
+                    put("epubScrollFraction", bookmark.epubScrollFraction)
+                    put("pdfPageIndex", bookmark.pdfPageIndex)
+                    put("pdfPageCount", bookmark.pdfPageCount)
+                    put("txtScrollFraction", bookmark.txtScrollFraction)
+                    put("createdAt", bookmark.createdAt)
+                    put("updatedAt", bookmark.updatedAt)
+                },
+            )
+        }
 
         context
             .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)

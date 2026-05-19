@@ -22,6 +22,9 @@ enum class LibrarySortMode(val label: String) {
     NAME_DESC("Name Z-A"),
     DATE_ADDED_ASC("Oldest added"),
     DATE_ADDED_DESC("Newest added"),
+    RECENTLY_OPENED("Recently opened"),
+    READING_PROGRESS("Reading progress"),
+    FILE_TYPE("File type"),
 }
 
 enum class LibraryFileFilter(
@@ -33,6 +36,7 @@ enum class LibraryFileFilter(
     PDF("PDF", DocumentType.PDF),
     TXT("TXT", DocumentType.TXT),
     FB2("FB2", DocumentType.FB2),
+    ZIP("ZIP", DocumentType.ZIP),
 }
 
 data class LibraryFolderEntry(
@@ -51,6 +55,11 @@ data class LibraryBookEntry(
     val type: DocumentType,
     val addedAt: Long = 0L,
     val pinned: Boolean = false,
+)
+
+data class LibraryBookLocation(
+    val root: LibraryRoot,
+    val folderRelativePath: String,
 )
 
 enum class LibrarySearchResultType {

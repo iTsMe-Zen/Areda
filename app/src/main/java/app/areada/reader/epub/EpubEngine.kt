@@ -1,4 +1,4 @@
-package app.areada.reader
+package app.areada.reader.epub
 
 import android.content.Context
 import android.net.Uri
@@ -812,3 +812,4 @@ object EpubEngine {
         val properties: String,
     )
 }
+

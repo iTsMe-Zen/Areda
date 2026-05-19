@@ -5,33 +5,46 @@ import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.areada.R
 import app.areada.data.AreadaCacheManager
+import app.areada.data.BookNoteLink
+import app.areada.data.BookStatus
 import app.areada.data.DocumentResolver
 import app.areada.data.DocumentType
 import app.areada.data.LibraryBookEntry
 import app.areada.data.LibraryFileFilter
 import app.areada.data.LibraryFolderEntry
 import app.areada.data.LibraryFolderPickerEntry
-import app.areada.data.LibraryPathSegment
 import app.areada.data.LibraryRepository
 import app.areada.data.LibraryRoot
 import app.areada.data.LibrarySearchIndexEntry
 import app.areada.data.LibrarySearchResult
 import app.areada.data.LibrarySearchResultType
 import app.areada.data.LibrarySortMode
-import app.areada.data.NaturalSort
-import app.areada.data.ReaderPreferences
 import app.areada.data.ReaderDocument
+import app.areada.data.ReaderPreferences
 import app.areada.data.ReaderStateStore
 import app.areada.data.ReadingBookmark
 import app.areada.data.ReadingProgress
 import app.areada.data.RecentDocument
 import app.areada.data.RecentDocumentStore
+import app.areada.data.ZipBookContainer
 import app.areada.data.epubBookmarkId
+import app.areada.data.folderDocumentTypesById
+import app.areada.data.isReadingProgressCompleted
+import app.areada.data.libraryRootSignature
+import app.areada.data.moveListItem
 import app.areada.data.pdfBookmarkId
+import app.areada.data.parseZipBookUriString
+import app.areada.data.rootPickerEntries
+import app.areada.data.sameLibraryBooks
+import app.areada.data.sameLibraryFolders
+import app.areada.data.sanitizeReaderPreferences
+import app.areada.data.sortLibraryBooks
+import app.areada.data.sortLibraryFolders
 import app.areada.data.txtBookmarkId
-import app.areada.reader.EpubBook
-import app.areada.reader.EpubEngine
+import app.areada.reader.epub.EpubBook
+import app.areada.reader.epub.EpubEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -45,56 +58,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
-
-data class ReaderUiState(
-    val isLoading: Boolean = false,
-    val recents: List<RecentDocument> = emptyList(),
-    val bookmarks: List<ReadingBookmark> = emptyList(),
-    val preferences: ReaderPreferences = ReaderPreferences(),
-    val progressByUri: Map<String, ReadingProgress> = emptyMap(),
-    val libraryRoots: List<LibraryRoot> = emptyList(),
-    val libraryFolderPickerEntries: List<LibraryFolderPickerEntry> = emptyList(),
-    val selectedRootUriString: String? = null,
-    val currentRelativePath: String = "",
-    val currentPathSegments: List<LibraryPathSegment> = emptyList(),
-    val currentFolders: List<LibraryFolderEntry> = emptyList(),
-    val currentBooks: List<LibraryBookEntry> = emptyList(),
-    val folderDocumentTypesById: Map<String, Set<DocumentType>> = emptyMap(),
-    val searchQuery: String = "",
-    val searchResults: List<LibrarySearchResult> = emptyList(),
-    val isSearching: Boolean = false,
-    val librarySortMode: LibrarySortMode = LibrarySortMode.NAME_ASC,
-    val libraryFileFilter: LibraryFileFilter = LibraryFileFilter.ALL,
-    val pinnedLibraryItemIds: Set<String> = emptySet(),
-    val libraryAddedAtById: Map<String, Long> = emptyMap(),
-    val currentScreen: ReaderScreen = ReaderScreen.Home,
-    val errorMessage: String? = null,
-)
-
-sealed interface ReaderScreen {
-    data object Home : ReaderScreen
-
-    data class Epub(
-        val document: ReaderDocument,
-        val book: EpubBook,
-        val initialChapterIndex: Int,
-        val initialScrollFraction: Float,
-    ) : ReaderScreen
-
-    data class Pdf(
-        val document: ReaderDocument,
-        val initialPageIndex: Int,
-        val initialZoomScale: Float,
-    ) : ReaderScreen
-
-    data class Text(
-        val document: ReaderDocument,
-        val initialText: String,
-        val initialScrollFraction: Float = 0f,
-        val deleteOnDiscard: Boolean = false,
-        val editable: Boolean = true,
-    ) : ReaderScreen
-}
 
 class ReaderViewModel : ViewModel() {
     private val _uiState = MutableStateFlow(ReaderUiState())
@@ -112,6 +75,11 @@ class ReaderViewModel : ViewModel() {
     private var requestedSearchIndexSignature: String = ""
     private var searchIndexGeneration: Int = 0
     private var libraryAddedAtCache: Map<String, Long> = emptyMap()
+    private var noteDocumentIdsCache: Set<String> = emptySet()
+    private var bookNoteLinksCache: Map<String, BookNoteLink> = emptyMap()
+    private var lastNoteSectionCache: Map<String, String> = emptyMap()
+    private var bookNoteReturnScreen: ReaderScreen? = null
+    private var pendingZipAddToRecents: Boolean = true
     private var applicationContext: Context? = null
     private val textSaveMutex = Mutex()
     private val textSaveSequenceByUri = mutableMapOf<String, Long>()
@@ -143,14 +111,19 @@ class ReaderViewModel : ViewModel() {
         applicationContext = appContext
         viewModelScope.launch(Dispatchers.IO) {
             val recents = RecentDocumentStore.load(appContext)
-                .sortedByDescending { it.lastOpenedAt }
             val preferences = ReaderStateStore.loadPreferences(appContext)
             val progressByUri = ReaderStateStore.loadProgress(appContext)
+            val bookStatusByUri = ReaderStateStore.loadBookStatuses(appContext)
             val bookmarks = ReaderStateStore.loadBookmarks(appContext)
             val libraryRoots = ReaderStateStore.loadLibraryRoots(appContext)
             val sortMode = ReaderStateStore.loadLibrarySortMode(appContext)
+            val fileFilter = ReaderStateStore.loadLibraryFileFilter(appContext)
+            val selectedHomeTabName = ReaderStateStore.loadHomeTabName(appContext)
             val pinnedIds = ReaderStateStore.loadPinnedLibraryItemIds(appContext)
             val addedAtById = ReaderStateStore.loadLibraryAddedAt(appContext)
+            noteDocumentIdsCache = ReaderStateStore.loadNoteDocumentIds(appContext)
+            bookNoteLinksCache = ReaderStateStore.loadBookNoteLinks(appContext)
+            lastNoteSectionCache = ReaderStateStore.loadLastNoteSections(appContext)
             libraryAddedAtCache = addedAtById
             val pickerEntries = rootPickerEntries(libraryRoots)
 
@@ -162,9 +135,14 @@ class ReaderViewModel : ViewModel() {
                         bookmarks = bookmarks,
                         preferences = preferences,
                         progressByUri = progressByUri,
+                        bookStatusByUri = bookStatusByUri,
+                        bookNoteLinksByUri = bookNoteLinksCache,
+                        lastNoteSectionByUri = lastNoteSectionCache,
                         libraryRoots = emptyList(),
                         libraryFolderPickerEntries = emptyList(),
                         librarySortMode = sortMode,
+                        libraryFileFilter = fileFilter,
+                        selectedHomeTabName = selectedHomeTabName,
                         pinnedLibraryItemIds = pinnedIds,
                         libraryAddedAtById = addedAtById,
                     )
@@ -188,6 +166,9 @@ class ReaderViewModel : ViewModel() {
                     sortMode = sortMode,
                     pinnedIds = pinnedIds,
                     addedAtById = addedAtById,
+                    progressByUri = progressByUri,
+                    recents = recents,
+                    bookStatusByUri = bookStatusByUri,
                 )
             }.onSuccess { folderState ->
                 cacheFolderState(initialRoot, folderState)
@@ -197,19 +178,19 @@ class ReaderViewModel : ViewModel() {
                         bookmarks = bookmarks,
                         preferences = preferences,
                         progressByUri = progressByUri,
+                        bookStatusByUri = bookStatusByUri,
+                        bookNoteLinksByUri = bookNoteLinksCache,
+                        lastNoteSectionByUri = lastNoteSectionCache,
                         libraryRoots = libraryRoots,
-                        libraryFolderPickerEntries = buildFolderPickerEntries(
-                            roots = libraryRoots,
-                            selectedRoot = initialRoot,
-                            pathSegments = folderState.pathSegments,
-                            folders = folderState.folders,
-                        ),
+                        libraryFolderPickerEntries = rootPickerEntries(libraryRoots),
                         selectedRootUriString = initialRoot.treeUriString,
                         currentRelativePath = folderState.currentRelativePath,
                         currentPathSegments = folderState.pathSegments,
                         currentFolders = folderState.folders,
                         currentBooks = folderState.books,
                         librarySortMode = sortMode,
+                        libraryFileFilter = fileFilter,
+                        selectedHomeTabName = selectedHomeTabName,
                         pinnedLibraryItemIds = pinnedIds,
                         libraryAddedAtById = libraryAddedAtCache,
                     )
@@ -230,13 +211,18 @@ class ReaderViewModel : ViewModel() {
                         bookmarks = bookmarks,
                         preferences = preferences,
                         progressByUri = progressByUri,
+                        bookStatusByUri = bookStatusByUri,
+                        bookNoteLinksByUri = bookNoteLinksCache,
+                        lastNoteSectionByUri = lastNoteSectionCache,
                         libraryRoots = libraryRoots,
                         libraryFolderPickerEntries = pickerEntries,
                         selectedRootUriString = initialRoot.treeUriString,
                         librarySortMode = sortMode,
+                        libraryFileFilter = fileFilter,
+                        selectedHomeTabName = selectedHomeTabName,
                         pinnedLibraryItemIds = pinnedIds,
                         libraryAddedAtById = addedAtById,
-                        errorMessage = "One of the saved folders is no longer available.",
+                        errorMessage = appContext.getString(R.string.folder_access_lost_body),
                     )
                 }
                 rebuildSearchIndex(
@@ -295,12 +281,7 @@ class ReaderViewModel : ViewModel() {
                     state.copy(
                         isLoading = false,
                         libraryRoots = updatedRoots,
-                        libraryFolderPickerEntries = buildFolderPickerEntries(
-                            roots = updatedRoots,
-                            selectedRoot = resolvedRoot,
-                            pathSegments = folderState.pathSegments,
-                            folders = folderState.folders,
-                        ),
+                        libraryFolderPickerEntries = rootPickerEntries(updatedRoots),
                         selectedRootUriString = resolvedRoot.treeUriString,
                         currentRelativePath = folderState.currentRelativePath,
                         currentPathSegments = folderState.pathSegments,
@@ -421,7 +402,7 @@ class ReaderViewModel : ViewModel() {
         }
 
         val roots = _uiState.value.libraryRoots
-        val freshIndex = searchIndexSignature == roots.signature()
+        val freshIndex = searchIndexSignature == roots.libraryRootSignature()
         if (!freshIndex) {
             val indexJobActive = searchIndexJob?.isActive == true
             if (!indexJobActive || searchIndex.isEmpty()) {
@@ -474,7 +455,7 @@ class ReaderViewModel : ViewModel() {
         force: Boolean = false,
         delayMillis: Long = 0L,
     ) {
-        val signature = roots.signature()
+        val signature = roots.libraryRootSignature()
 
         if (roots.isEmpty()) {
             clearSearchIndex()
@@ -641,6 +622,7 @@ class ReaderViewModel : ViewModel() {
         context: Context,
         uri: Uri,
         fromRecent: Boolean = false,
+        addToRecents: Boolean = true,
         preResolvedDocument: ReaderDocument? = null,
         initialProgressOverride: ReadingProgress? = null,
     ) {
@@ -654,8 +636,44 @@ class ReaderViewModel : ViewModel() {
             }
 
             try {
-                val document = preResolvedDocument ?: withContext(Dispatchers.IO) {
+                val initialDocument = preResolvedDocument ?: withContext(Dispatchers.IO) {
                     DocumentResolver.resolve(appContext, uri)
+                }
+                val document = when {
+                    parseZipBookUriString(initialDocument.uriString) != null -> withContext(Dispatchers.IO) {
+                        val reference = parseZipBookUriString(initialDocument.uriString)
+                            ?: error(appContext.getString(R.string.zip_could_not_open_selected))
+                        val entry = ZipBookContainer
+                            .listSupportedEntries(appContext, Uri.parse(reference.archiveUriString))
+                            .firstOrNull { zipEntry -> zipEntry.entryName == reference.entryName }
+                            ?: error(appContext.getString(R.string.zip_could_not_open_selected))
+                        ZipBookContainer.extractEntry(appContext, entry)
+                    }
+
+                    initialDocument.type == DocumentType.ZIP -> {
+                        val zipEntries = withContext(Dispatchers.IO) {
+                            ZipBookContainer.listSupportedEntries(appContext, initialDocument.uri)
+                        }
+                        when (zipEntries.size) {
+                            0 -> error(appContext.getString(R.string.zip_no_supported_books))
+                            1 -> withContext(Dispatchers.IO) {
+                                ZipBookContainer.extractEntry(appContext, zipEntries.first())
+                            }
+                            else -> {
+                                pendingZipAddToRecents = addToRecents
+                                _uiState.update { state ->
+                                    state.copy(
+                                        isLoading = false,
+                                        zipEntriesToChoose = zipEntries,
+                                        errorMessage = null,
+                                    )
+                                }
+                                return@launch
+                            }
+                        }
+                    }
+
+                    else -> initialDocument
                 }
                 val savedProgress = initialProgressOverride ?: _uiState.value.progressByUri[document.uriString]
 
@@ -687,20 +705,35 @@ class ReaderViewModel : ViewModel() {
                     )
 
                     DocumentType.TXT,
-                    DocumentType.FB2 -> ReaderScreen.Text(
-                        document = document,
-                        initialText = withContext(Dispatchers.IO) {
-                            LibraryRepository.readTextLikeDocument(appContext, document)
-                        },
-                        initialScrollFraction = savedProgress?.txtScrollFraction?.coerceIn(0f, 1f) ?: 0f,
-                        editable = document.type == DocumentType.TXT,
-                    )
+                    DocumentType.FB2 -> {
+                        val content = withContext(Dispatchers.IO) {
+                            LibraryRepository.readTextLikeDocumentContent(appContext, document)
+                        }
+                        ReaderScreen.Text(
+                            document = content.title
+                                ?.takeIf { title -> document.type == DocumentType.FB2 && title.isNotBlank() }
+                                ?.let { title -> document.copy(title = title) }
+                                ?: document,
+                            initialText = content.text,
+                            initialScrollFraction = savedProgress?.txtScrollFraction?.coerceIn(0f, 1f) ?: 0f,
+                            editable = document.type == DocumentType.TXT,
+                            sectionedNote = document.type == DocumentType.TXT &&
+                                document.uriString in noteDocumentIdsCache,
+                            initialNoteSectionTitle = lastNoteSectionCache[document.uriString],
+                        )
+                    }
+
+                    DocumentType.ZIP -> error(appContext.getString(R.string.zip_could_not_open))
                 }
 
-                val updatedRecents = withContext(Dispatchers.IO) {
-                    buildUpdatedRecents(_uiState.value.recents, document).also { recents ->
-                        RecentDocumentStore.save(appContext, recents)
+                val updatedRecents = if (addToRecents) {
+                    withContext(Dispatchers.IO) {
+                        buildUpdatedRecents(_uiState.value.recents, document).also { recents ->
+                            RecentDocumentStore.save(appContext, recents)
+                        }
                     }
+                } else {
+                    _uiState.value.recents
                 }
 
                 _uiState.update { state ->
@@ -708,6 +741,7 @@ class ReaderViewModel : ViewModel() {
                         isLoading = false,
                         recents = updatedRecents,
                         currentScreen = screen,
+                        zipEntriesToChoose = emptyList(),
                         errorMessage = null,
                     )
                 }
@@ -744,16 +778,53 @@ class ReaderViewModel : ViewModel() {
     fun openExternalDocument(
         context: Context,
         uri: Uri,
+        addToRecents: Boolean = true,
     ) {
         val scheme = uri.scheme?.lowercase(Locale.ROOT)
         if (scheme != "content" && scheme != "file") {
             _uiState.update { state ->
-                state.copy(errorMessage = "Unable to open that file.")
+                state.copy(errorMessage = context.getString(R.string.could_not_open_file))
             }
             return
         }
 
-        openDocument(context = context, uri = uri)
+        openDocument(context = context, uri = uri, addToRecents = addToRecents)
+    }
+
+    fun openPickedDocument(
+        context: Context,
+        uri: Uri,
+    ) {
+        persistDocumentReadPermission(context.applicationContext, uri)
+        openExternalDocument(context, uri, addToRecents = false)
+    }
+
+    fun openZipEntry(
+        context: Context,
+        entry: app.areada.data.ZipBookEntry,
+    ) {
+        _uiState.update { state ->
+            state.copy(zipEntriesToChoose = emptyList())
+        }
+        openDocument(
+            context = context,
+            uri = Uri.parse(entry.uriString),
+            addToRecents = pendingZipAddToRecents,
+            preResolvedDocument = ReaderDocument(
+                uri = Uri.parse(entry.uriString),
+                uriString = entry.uriString,
+                title = entry.title,
+                type = entry.type,
+            ),
+        )
+        pendingZipAddToRecents = true
+    }
+
+    fun dismissZipEntries() {
+        pendingZipAddToRecents = true
+        _uiState.update { state ->
+            state.copy(zipEntriesToChoose = emptyList())
+        }
     }
 
     fun reopenRecent(
@@ -985,12 +1056,7 @@ class ReaderViewModel : ViewModel() {
                     state.copy(
                         isLoading = false,
                         libraryRoots = updatedRoots,
-                        libraryFolderPickerEntries = buildFolderPickerEntries(
-                            roots = updatedRoots,
-                            selectedRoot = nextRoot,
-                            pathSegments = folderState.pathSegments,
-                            folders = folderState.folders,
-                        ),
+                        libraryFolderPickerEntries = rootPickerEntries(updatedRoots),
                         selectedRootUriString = nextRoot.treeUriString,
                         currentRelativePath = folderState.currentRelativePath,
                         currentPathSegments = folderState.pathSegments,
@@ -1051,10 +1117,15 @@ class ReaderViewModel : ViewModel() {
                     pinned = note.id in stateBeforeUpdate.pinnedLibraryItemIds,
                 )
                 val updatedAddedAt = stateBeforeUpdate.libraryAddedAtById + (note.id to decoratedNote.addedAt)
+                val updatedNoteDocumentIds = noteDocumentIdsCache + note.uriString
                 libraryAddedAtCache = updatedAddedAt
-                val updatedBooks = sortBooks(
+                noteDocumentIdsCache = updatedNoteDocumentIds
+                val updatedBooks = sortLibraryBooks(
                     books = stateBeforeUpdate.currentBooks.filterNot { book -> book.id == note.id } + decoratedNote,
                     sortMode = stateBeforeUpdate.librarySortMode,
+                    progressByUri = stateBeforeUpdate.progressByUri,
+                    recents = stateBeforeUpdate.recents,
+                    bookStatusByUri = stateBeforeUpdate.bookStatusByUri,
                 )
                 val updatedRecents = buildUpdatedRecents(stateBeforeUpdate.recents, document)
                 if (
@@ -1091,6 +1162,7 @@ class ReaderViewModel : ViewModel() {
                             initialText = "",
                             initialScrollFraction = 0f,
                             deleteOnDiscard = true,
+                            sectionedNote = true,
                         ),
                         errorMessage = null,
                     )
@@ -1098,6 +1170,7 @@ class ReaderViewModel : ViewModel() {
                 viewModelScope.launch(Dispatchers.IO) {
                     RecentDocumentStore.save(appContext, updatedRecents)
                     ReaderStateStore.saveLibraryAddedAt(appContext, updatedAddedAt)
+                    ReaderStateStore.saveNoteDocumentIds(appContext, updatedNoteDocumentIds)
                 }
                 markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
             }.onFailure { throwable ->
@@ -1111,8 +1184,194 @@ class ReaderViewModel : ViewModel() {
         }
     }
 
+    fun openBookNote(
+        context: Context,
+        document: ReaderDocument,
+    ) {
+        val returnScreen = _uiState.value.currentScreen.takeIf { screen ->
+            screen !is ReaderScreen.Home && !(screen is ReaderScreen.Text && screen.sectionedNote)
+        }
+        openOrCreateBookNote(
+            context = context,
+            bookUriString = document.uriString,
+            bookTitle = document.title,
+            returnScreen = returnScreen,
+        )
+    }
+
+    fun openBookNoteForBook(
+        context: Context,
+        book: LibraryBookEntry,
+    ) {
+        openOrCreateBookNote(
+            context = context,
+            bookUriString = book.uriString,
+            bookTitle = book.title,
+            returnScreen = null,
+        )
+    }
+
+    private fun openOrCreateBookNote(
+        context: Context,
+        bookUriString: String,
+        bookTitle: String,
+        returnScreen: ReaderScreen?,
+    ) {
+        if (bookUriString.isBlank()) {
+            return
+        }
+        val appContext = context.applicationContext
+
+        viewModelScope.launch {
+            _uiState.update { state -> state.copy(errorMessage = null) }
+
+            runCatching {
+                val stateBeforeUpdate = _uiState.value
+                val previousReaderScreen = returnScreen
+                val existingLink = stateBeforeUpdate.bookNoteLinksByUri[bookUriString]
+                val noteDocument = if (existingLink != null) {
+                    ReaderDocument(
+                        uri = Uri.parse(existingLink.noteUriString),
+                        uriString = existingLink.noteUriString,
+                        title = existingLink.noteTitle.ifBlank { "Book Note" },
+                        type = DocumentType.TXT,
+                    )
+                } else {
+                    val bookLocationUriString = parseZipBookUriString(bookUriString)?.archiveUriString ?: bookUriString
+                    val targetLocation = withContext(Dispatchers.IO) {
+                        LibraryRepository.findBookLocation(
+                            context = appContext,
+                            roots = stateBeforeUpdate.libraryRoots,
+                            uriString = bookLocationUriString,
+                        )
+                    }
+                    val targetRoot = targetLocation?.root
+                        ?: currentRoot()
+                        ?: error(appContext.getString(R.string.choose_folder_before_book_note))
+                    val targetRelativePath = targetLocation?.folderRelativePath
+                        ?: stateBeforeUpdate.currentRelativePath
+                    val createdNote = withContext(Dispatchers.IO) {
+                        LibraryRepository.createTextNote(
+                            context = appContext,
+                            root = targetRoot,
+                            relativePath = targetRelativePath,
+                            baseName = "${bookTitle.ifBlank { "Book" }} Note",
+                        ) ?: error(appContext.getString(R.string.could_not_create_book_note))
+                    }
+                    val document = ReaderDocument(
+                        uri = Uri.parse(createdNote.uriString),
+                        uriString = createdNote.uriString,
+                        title = createdNote.title,
+                        type = DocumentType.TXT,
+                    )
+                    val now = System.currentTimeMillis()
+                    val decoratedNote = createdNote.copy(
+                        addedAt = stateBeforeUpdate.libraryAddedAtById[createdNote.id] ?: now,
+                        pinned = createdNote.id in stateBeforeUpdate.pinnedLibraryItemIds,
+                    )
+                    val updatedAddedAt = stateBeforeUpdate.libraryAddedAtById + (createdNote.id to decoratedNote.addedAt)
+                    val updatedNoteDocumentIds = noteDocumentIdsCache + createdNote.uriString
+                    val updatedBookNoteLinks = stateBeforeUpdate.bookNoteLinksByUri + (
+                        bookUriString to BookNoteLink(
+                            bookUriString = bookUriString,
+                            noteUriString = createdNote.uriString,
+                            noteTitle = createdNote.title,
+                        )
+                    )
+                    libraryAddedAtCache = updatedAddedAt
+                    noteDocumentIdsCache = updatedNoteDocumentIds
+                    bookNoteLinksCache = updatedBookNoteLinks
+
+                    val updatedBooks = sortLibraryBooks(
+                        books = stateBeforeUpdate.currentBooks.filterNot { book -> book.id == createdNote.id } + decoratedNote,
+                        sortMode = stateBeforeUpdate.librarySortMode,
+                        progressByUri = stateBeforeUpdate.progressByUri,
+                        recents = stateBeforeUpdate.recents,
+                        bookStatusByUri = stateBeforeUpdate.bookStatusByUri,
+                    )
+                    if (
+                        stateBeforeUpdate.selectedRootUriString == targetRoot.treeUriString &&
+                        stateBeforeUpdate.currentRelativePath == targetRelativePath
+                    ) {
+                        cacheFolderState(
+                            root = targetRoot,
+                            folderState = app.areada.data.LibraryFolderState(
+                                root = targetRoot,
+                                currentRelativePath = targetRelativePath,
+                                pathSegments = stateBeforeUpdate.currentPathSegments,
+                                folders = stateBeforeUpdate.currentFolders,
+                                books = updatedBooks,
+                            ),
+                        )
+                    }
+                    _uiState.update { state ->
+                        state.copy(
+                            currentBooks = if (
+                                state.selectedRootUriString == targetRoot.treeUriString &&
+                                state.currentRelativePath == targetRelativePath
+                            ) {
+                                updatedBooks
+                            } else {
+                                state.currentBooks
+                            },
+                            libraryAddedAtById = updatedAddedAt,
+                            bookNoteLinksByUri = updatedBookNoteLinks,
+                        )
+                    }
+                    withContext(Dispatchers.IO) {
+                        ReaderStateStore.saveLibraryAddedAt(appContext, updatedAddedAt)
+                        ReaderStateStore.saveNoteDocumentIds(appContext, updatedNoteDocumentIds)
+                        ReaderStateStore.saveBookNoteLinks(appContext, updatedBookNoteLinks)
+                    }
+                    markSearchIndexDirty(appContext, _uiState.value.libraryRoots)
+                    document
+                }
+
+                val text = withContext(Dispatchers.IO) {
+                    LibraryRepository.readText(appContext, noteDocument.uri)
+                }
+                val updatedRecents = buildUpdatedRecents(_uiState.value.recents, noteDocument)
+                withContext(Dispatchers.IO) {
+                    RecentDocumentStore.save(appContext, updatedRecents)
+                }
+                bookNoteReturnScreen = previousReaderScreen
+                _uiState.update { state ->
+                    state.copy(
+                        isLoading = false,
+                        recents = updatedRecents,
+                        currentScreen = ReaderScreen.Text(
+                            document = noteDocument,
+                            initialText = text,
+                            initialScrollFraction = 0f,
+                            deleteOnDiscard = false,
+                            editable = true,
+                            sectionedNote = true,
+                            initialNoteSectionTitle = lastNoteSectionCache[noteDocument.uriString],
+                        ),
+                        errorMessage = null,
+                    )
+                }
+            }.onFailure { throwable ->
+                bookNoteReturnScreen = null
+                _uiState.update { state ->
+                    state.copy(errorMessage = displayError(throwable, appContext.getString(R.string.could_not_open_book_note)))
+                }
+            }
+        }
+    }
+
     fun closeReader() {
         documentOpenJob?.cancel()
+        val returnScreen = bookNoteReturnScreen
+        val currentScreen = _uiState.value.currentScreen
+        if (returnScreen != null && currentScreen is ReaderScreen.Text && currentScreen.sectionedNote) {
+            bookNoteReturnScreen = null
+            _uiState.update { state ->
+                state.copy(currentScreen = returnScreen.withLatestProgress(state.progressByUri))
+            }
+            return
+        }
+        bookNoteReturnScreen = null
         _uiState.update { state ->
             state.copy(currentScreen = ReaderScreen.Home)
         }
@@ -1130,16 +1389,97 @@ class ReaderViewModel : ViewModel() {
         preferences: ReaderPreferences,
     ) {
         val appContext = context.applicationContext
-        val sanitized = preferences.copy(
-            fontSizeSp = preferences.fontSizeSp.coerceIn(14, 30),
-            lineSpacing = preferences.lineSpacing.coerceIn(1.2f, 2.4f),
-        )
+        val sanitized = sanitizeReaderPreferences(preferences)
         _uiState.update { state ->
             state.copy(preferences = sanitized)
         }
 
         viewModelScope.launch(Dispatchers.IO) {
             ReaderStateStore.savePreferences(appContext, sanitized)
+        }
+    }
+
+    fun updateBookStatus(
+        context: Context,
+        uriString: String,
+        status: BookStatus,
+    ) {
+        if (uriString.isBlank()) {
+            return
+        }
+
+        val appContext = context.applicationContext
+        val updatedStatuses = _uiState.value.bookStatusByUri + (uriString to status)
+        _uiState.update { state ->
+            state.copy(bookStatusByUri = updatedStatuses)
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            ReaderStateStore.saveBookStatuses(appContext, updatedStatuses)
+        }
+    }
+
+    fun updateLastNoteSection(
+        context: Context,
+        noteUriString: String,
+        sectionTitle: String,
+    ) {
+        if (noteUriString.isBlank() || sectionTitle.isBlank()) {
+            return
+        }
+        val appContext = context.applicationContext
+        val updatedSections = _uiState.value.lastNoteSectionByUri + (noteUriString to sectionTitle)
+        lastNoteSectionCache = updatedSections
+        _uiState.update { state ->
+            state.copy(lastNoteSectionByUri = updatedSections)
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            ReaderStateStore.saveLastNoteSections(appContext, updatedSections)
+        }
+    }
+
+    fun togglePinDocument(
+        context: Context,
+        uriString: String,
+    ) {
+        if (uriString.isNotBlank()) {
+            togglePinnedItem(context, uriString)
+        }
+    }
+
+    fun moveRecent(
+        context: Context,
+        recent: RecentDocument,
+        offset: Int,
+    ) {
+        val appContext = context.applicationContext
+        val currentRecents = _uiState.value.recents
+        val index = currentRecents.indexOfFirst { item -> item.uriString == recent.uriString }
+        val updatedRecents = moveListItem(currentRecents, index, offset)
+        if (updatedRecents == currentRecents) {
+            return
+        }
+        _uiState.update { state -> state.copy(recents = updatedRecents) }
+        viewModelScope.launch(Dispatchers.IO) {
+            RecentDocumentStore.save(appContext, updatedRecents)
+        }
+    }
+
+    fun moveBookmark(
+        context: Context,
+        bookmark: ReadingBookmark,
+        offset: Int,
+    ) {
+        val appContext = context.applicationContext
+        val currentBookmarks = _uiState.value.bookmarks
+        val index = currentBookmarks.indexOfFirst { item -> item.id == bookmark.id }
+        val updatedBookmarks = moveListItem(currentBookmarks, index, offset)
+        if (updatedBookmarks == currentBookmarks) {
+            return
+        }
+        _uiState.update { state -> state.copy(bookmarks = updatedBookmarks) }
+        viewModelScope.launch(Dispatchers.IO) {
+            ReaderStateStore.saveBookmarks(appContext, updatedBookmarks)
         }
     }
 
@@ -1163,20 +1503,40 @@ class ReaderViewModel : ViewModel() {
         context: Context,
         filter: LibraryFileFilter,
     ) {
+        val appContext = context.applicationContext
         val roots = _uiState.value.libraryRoots
         _uiState.update { state ->
             state.copy(libraryFileFilter = filter)
         }
+        viewModelScope.launch(Dispatchers.IO) {
+            ReaderStateStore.saveLibraryFileFilter(appContext, filter)
+        }
         if (
             filter.documentType != null &&
             roots.isNotEmpty() &&
-            (searchIndex.isEmpty() || searchIndexSignature != roots.signature())
+            (searchIndex.isEmpty() || searchIndexSignature != roots.libraryRootSignature())
         ) {
             rebuildSearchIndex(
                 context = context.applicationContext,
                 roots = roots,
                 delayMillis = 0L,
             )
+        }
+    }
+
+    fun updateHomeTab(
+        context: Context,
+        tabName: String,
+    ) {
+        if (tabName.isBlank()) {
+            return
+        }
+        val appContext = context.applicationContext
+        _uiState.update { state ->
+            state.copy(selectedHomeTabName = tabName)
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            ReaderStateStore.saveHomeTabName(appContext, tabName)
         }
     }
 
@@ -1248,16 +1608,29 @@ class ReaderViewModel : ViewModel() {
                 val updatedRecents = _uiState.value.recents.filterNot { it.uriString == book.uriString }
                 val updatedProgress = _uiState.value.progressByUri - book.uriString
                 val updatedBookmarks = _uiState.value.bookmarks.filterNot { it.uriString == book.uriString }
+                val updatedNoteDocumentIds = noteDocumentIdsCache - book.uriString
+                val updatedBookNoteLinks = _uiState.value.bookNoteLinksByUri
+                    .filterKeys { bookUriString -> bookUriString != book.uriString }
+                    .filterValues { link -> link.noteUriString != book.uriString }
+                val updatedLastNoteSections = _uiState.value.lastNoteSectionByUri - book.uriString
+                noteDocumentIdsCache = updatedNoteDocumentIds
+                bookNoteLinksCache = updatedBookNoteLinks
+                lastNoteSectionCache = updatedLastNoteSections
                 withContext(Dispatchers.IO) {
                     RecentDocumentStore.save(appContext, updatedRecents)
                     ReaderStateStore.saveProgress(appContext, updatedProgress)
                     ReaderStateStore.saveBookmarks(appContext, updatedBookmarks)
+                    ReaderStateStore.saveNoteDocumentIds(appContext, updatedNoteDocumentIds)
+                    ReaderStateStore.saveBookNoteLinks(appContext, updatedBookNoteLinks)
+                    ReaderStateStore.saveLastNoteSections(appContext, updatedLastNoteSections)
                 }
                 _uiState.update {
                     it.copy(
                         recents = updatedRecents,
                         progressByUri = updatedProgress,
                         bookmarks = updatedBookmarks,
+                        bookNoteLinksByUri = updatedBookNoteLinks,
+                        lastNoteSectionByUri = updatedLastNoteSections,
                     )
                 }
                 clearFolderStateCache()
@@ -1430,7 +1803,7 @@ class ReaderViewModel : ViewModel() {
                         currentScreen is ReaderScreen.Text &&
                         currentScreen.document.uriString == document.uriString
                     ) {
-                        state.copy(errorMessage = "Unable to save that note.")
+                        state.copy(errorMessage = appContext.getString(R.string.could_not_save_note))
                     } else {
                         state
                     }
@@ -1458,16 +1831,29 @@ class ReaderViewModel : ViewModel() {
                 val updatedRecents = _uiState.value.recents.filterNot { it.uriString == document.uriString }
                 val updatedProgress = _uiState.value.progressByUri - document.uriString
                 val updatedBookmarks = _uiState.value.bookmarks.filterNot { it.uriString == document.uriString }
+                val updatedNoteDocumentIds = noteDocumentIdsCache - document.uriString
+                val updatedBookNoteLinks = _uiState.value.bookNoteLinksByUri
+                    .filterKeys { bookUriString -> bookUriString != document.uriString }
+                    .filterValues { link -> link.noteUriString != document.uriString }
+                val updatedLastNoteSections = _uiState.value.lastNoteSectionByUri - document.uriString
+                noteDocumentIdsCache = updatedNoteDocumentIds
+                bookNoteLinksCache = updatedBookNoteLinks
+                lastNoteSectionCache = updatedLastNoteSections
                 withContext(Dispatchers.IO) {
                     RecentDocumentStore.save(appContext, updatedRecents)
                     ReaderStateStore.saveProgress(appContext, updatedProgress)
                     ReaderStateStore.saveBookmarks(appContext, updatedBookmarks)
+                    ReaderStateStore.saveNoteDocumentIds(appContext, updatedNoteDocumentIds)
+                    ReaderStateStore.saveBookNoteLinks(appContext, updatedBookNoteLinks)
+                    ReaderStateStore.saveLastNoteSections(appContext, updatedLastNoteSections)
                 }
                 _uiState.update { state ->
                     state.copy(
                         recents = updatedRecents,
                         progressByUri = updatedProgress,
                         bookmarks = updatedBookmarks,
+                        bookNoteLinksByUri = updatedBookNoteLinks,
+                        lastNoteSectionByUri = updatedLastNoteSections,
                         currentScreen = ReaderScreen.Home,
                     )
                 }
@@ -1532,14 +1918,42 @@ class ReaderViewModel : ViewModel() {
                         recent
                     }
                 }
+                val updatedNoteDocumentIds = if (document.uriString in noteDocumentIdsCache) {
+                    noteDocumentIdsCache - document.uriString + renamedDocument.uriString
+                } else {
+                    noteDocumentIdsCache
+                }
+                val updatedBookNoteLinks = _uiState.value.bookNoteLinksByUri.mapValues { (_, link) ->
+                    if (link.noteUriString == document.uriString) {
+                        link.copy(
+                            noteUriString = renamedDocument.uriString,
+                            noteTitle = renamedDocument.title,
+                        )
+                    } else {
+                        link
+                    }
+                }
+                val updatedLastNoteSections = _uiState.value.lastNoteSectionByUri.let { sections ->
+                    sections[document.uriString]?.let { sectionTitle ->
+                        sections - document.uriString + (renamedDocument.uriString to sectionTitle)
+                    } ?: sections
+                }
+                noteDocumentIdsCache = updatedNoteDocumentIds
+                bookNoteLinksCache = updatedBookNoteLinks
+                lastNoteSectionCache = updatedLastNoteSections
                 withContext(Dispatchers.IO) {
                     RecentDocumentStore.save(appContext, updatedRecents)
                     ReaderStateStore.saveBookmarks(appContext, updatedBookmarks)
+                    ReaderStateStore.saveNoteDocumentIds(appContext, updatedNoteDocumentIds)
+                    ReaderStateStore.saveBookNoteLinks(appContext, updatedBookNoteLinks)
+                    ReaderStateStore.saveLastNoteSections(appContext, updatedLastNoteSections)
                 }
                 _uiState.update { state ->
                     state.copy(
                         recents = updatedRecents,
                         bookmarks = updatedBookmarks,
+                        bookNoteLinksByUri = updatedBookNoteLinks,
+                        lastNoteSectionByUri = updatedLastNoteSections,
                         currentScreen = if (
                             currentScreen is ReaderScreen.Text &&
                             currentScreen.document.uriString == document.uriString
@@ -1603,12 +2017,7 @@ class ReaderViewModel : ViewModel() {
                     currentPathSegments = cachedFolder.pathSegments,
                     currentFolders = cachedFolder.folders,
                     currentBooks = cachedFolder.books,
-                    libraryFolderPickerEntries = buildFolderPickerEntries(
-                        roots = state.libraryRoots,
-                        selectedRoot = root,
-                        pathSegments = cachedFolder.pathSegments,
-                        folders = cachedFolder.folders,
-                    ),
+                    libraryFolderPickerEntries = rootPickerEntries(state.libraryRoots),
                     libraryAddedAtById = libraryAddedAtCache,
                     errorMessage = null,
                 )
@@ -1650,8 +2059,8 @@ class ReaderViewModel : ViewModel() {
                         (cachedFolder != null || !showLoading) &&
                         state.selectedRootUriString == root.treeUriString &&
                         state.currentRelativePath == folderState.currentRelativePath &&
-                        sameFolders(state.currentFolders, folderState.folders) &&
-                        sameBooks(state.currentBooks, folderState.books)
+                        sameLibraryFolders(state.currentFolders, folderState.folders) &&
+                        sameLibraryBooks(state.currentBooks, folderState.books)
                     ) {
                         return@update state.copy(isLoading = false)
                     }
@@ -1663,12 +2072,7 @@ class ReaderViewModel : ViewModel() {
                         currentPathSegments = folderState.pathSegments,
                         currentFolders = folderState.folders,
                         currentBooks = folderState.books,
-                        libraryFolderPickerEntries = buildFolderPickerEntries(
-                            roots = state.libraryRoots,
-                            selectedRoot = root,
-                            pathSegments = folderState.pathSegments,
-                            folders = folderState.folders,
-                        ),
+                        libraryFolderPickerEntries = rootPickerEntries(state.libraryRoots),
                         libraryAddedAtById = libraryAddedAtCache,
                         errorMessage = null,
                     )
@@ -1695,6 +2099,21 @@ class ReaderViewModel : ViewModel() {
             context.contentResolver.takePersistableUriPermission(
                 treeUri,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }
+    }
+
+    private fun persistDocumentReadPermission(
+        context: Context,
+        uri: Uri,
+    ) {
+        if (uri.scheme?.lowercase(Locale.ROOT) != "content") {
+            return
+        }
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
             )
         }
     }
@@ -1791,7 +2210,8 @@ class ReaderViewModel : ViewModel() {
             DocumentType.EPUB -> epubBookmarkId(document.uriString, epubChapterIndex, epubScrollFraction)
             DocumentType.PDF -> pdfBookmarkId(document.uriString, pdfPageIndex)
             DocumentType.TXT,
-            DocumentType.FB2 -> txtBookmarkId(document.uriString, txtScrollFraction)
+            DocumentType.FB2,
+            DocumentType.ZIP -> txtBookmarkId(document.uriString, txtScrollFraction)
         }
         return copy(
             id = newId,
@@ -1805,7 +2225,7 @@ class ReaderViewModel : ViewModel() {
         progress: ReadingProgress,
     ) {
         val appContext = context.applicationContext
-        val completed = isCompleted(progress)
+        val completed = isReadingProgressCompleted(progress)
         val updatedProgress = if (completed) {
             _uiState.value.progressByUri - progress.uriString
         } else {
@@ -1934,86 +2354,11 @@ class ReaderViewModel : ViewModel() {
         }
     }
 
-    private fun sameFolders(
-        left: List<LibraryFolderEntry>,
-        right: List<LibraryFolderEntry>,
-    ): Boolean =
-        left.size == right.size && left.zip(right).all { (leftFolder, rightFolder) ->
-            leftFolder.id == rightFolder.id &&
-                leftFolder.name == rightFolder.name &&
-                leftFolder.pinned == rightFolder.pinned
-        }
-
-    private fun sameBooks(
-        left: List<LibraryBookEntry>,
-        right: List<LibraryBookEntry>,
-    ): Boolean =
-        left.size == right.size && left.zip(right).all { (leftBook, rightBook) ->
-            leftBook.id == rightBook.id &&
-                leftBook.title == rightBook.title &&
-                leftBook.fileName == rightBook.fileName &&
-                leftBook.type == rightBook.type &&
-                leftBook.pinned == rightBook.pinned
-        }
-
-    private fun List<LibraryRoot>.signature(): String =
-        joinToString(separator = "|") { root -> root.treeUriString }
-
-    private fun rootPickerEntries(roots: List<LibraryRoot>): List<LibraryFolderPickerEntry> =
-        roots.map { root ->
-            LibraryFolderPickerEntry(
-                rootUriString = root.treeUriString,
-                relativePath = "",
-                name = root.name,
-                depth = 0,
-            )
-        }
-
-    private fun buildFolderPickerEntries(
-        roots: List<LibraryRoot>,
-        selectedRoot: LibraryRoot?,
-        pathSegments: List<LibraryPathSegment>,
-        folders: List<LibraryFolderEntry>,
-    ): List<LibraryFolderPickerEntry> = rootPickerEntries(roots)
-
     private fun trimEpubCache() {
         while (epubBookCache.size > 4) {
             val oldestKey = epubBookCache.keys.firstOrNull() ?: return
             epubBookCache.remove(oldestKey)
         }
-    }
-
-    private fun folderDocumentTypesById(
-        index: List<LibrarySearchIndexEntry>,
-    ): Map<String, Set<DocumentType>> {
-        val typesByFolder = linkedMapOf<String, MutableSet<DocumentType>>()
-        index.forEach { entry ->
-            val result = entry.result
-            if (result.type != LibrarySearchResultType.BOOK) {
-                return@forEach
-            }
-            val documentType = result.documentType ?: return@forEach
-            val pathSegments = result.relativePath
-                .split('/')
-                .filter { segment -> segment.isNotBlank() }
-            if (pathSegments.size <= 1) {
-                return@forEach
-            }
-
-            var folderPath = ""
-            pathSegments.dropLast(1).forEach { segment ->
-                folderPath = if (folderPath.isBlank()) segment else "$folderPath/$segment"
-                val folderId = LibraryRepository.folderId(
-                    root = LibraryRoot(
-                        treeUriString = result.rootUriString,
-                        name = result.rootName,
-                    ),
-                    relativePath = folderPath,
-                )
-                typesByFolder.getOrPut(folderId) { linkedSetOf() } += documentType
-            }
-        }
-        return typesByFolder.mapValues { (_, types) -> types.toSet() }
     }
 
     private fun prepareFolderState(
@@ -2022,6 +2367,9 @@ class ReaderViewModel : ViewModel() {
         sortMode: LibrarySortMode,
         pinnedIds: Set<String>,
         addedAtById: Map<String, Long>,
+        progressByUri: Map<String, ReadingProgress> = _uiState.value.progressByUri,
+        recents: List<RecentDocument> = _uiState.value.recents,
+        bookStatusByUri: Map<String, BookStatus> = _uiState.value.bookStatusByUri,
     ): app.areada.data.LibraryFolderState {
         val now = System.currentTimeMillis()
         val updatedAddedAt = addedAtById.toMutableMap()
@@ -2047,64 +2395,16 @@ class ReaderViewModel : ViewModel() {
         }
 
         return folderState.copy(
-            folders = sortFolders(folders, sortMode),
-            books = sortBooks(books, sortMode),
+            folders = sortLibraryFolders(folders, sortMode),
+            books = sortLibraryBooks(
+                books = books,
+                sortMode = sortMode,
+                progressByUri = progressByUri,
+                recents = recents,
+                bookStatusByUri = bookStatusByUri,
+            ),
         )
     }
-
-    private fun sortFolders(
-        folders: List<LibraryFolderEntry>,
-        sortMode: LibrarySortMode,
-    ): List<LibraryFolderEntry> =
-        sortLibraryEntries(
-            items = folders,
-            sortMode = sortMode,
-            title = { it.name },
-            addedAt = { it.addedAt },
-            pinned = { it.pinned },
-        )
-
-    private fun sortBooks(
-        books: List<LibraryBookEntry>,
-        sortMode: LibrarySortMode,
-    ): List<LibraryBookEntry> =
-        sortLibraryEntries(
-            items = books,
-            sortMode = sortMode,
-            title = { it.title },
-            addedAt = { it.addedAt },
-            pinned = { it.pinned },
-        )
-
-    private fun <T> sortLibraryEntries(
-        items: List<T>,
-        sortMode: LibrarySortMode,
-        title: (T) -> String,
-        addedAt: (T) -> Long,
-        pinned: (T) -> Boolean,
-    ): List<T> {
-        val sorted = when (sortMode) {
-            LibrarySortMode.NAME_ASC -> items.sortedWith(NaturalSort.comparator(title))
-            LibrarySortMode.NAME_DESC -> items.sortedWith(NaturalSort.comparator(title).reversed())
-            LibrarySortMode.DATE_ADDED_ASC -> items.sortedBy { addedAt(it) }
-            LibrarySortMode.DATE_ADDED_DESC -> items.sortedByDescending { addedAt(it) }
-        }
-
-        return sorted.sortedByDescending { pinned(it) }
-    }
-
-    private fun isCompleted(progress: ReadingProgress): Boolean =
-        when (progress.type) {
-            DocumentType.EPUB -> progress.epubChapterCount > 0 &&
-                progress.epubChapterIndex >= progress.epubChapterCount - 1 &&
-                progress.epubScrollFraction >= 0.98f
-
-            DocumentType.PDF -> progress.pdfPageCount > 0 &&
-                progress.pdfPageIndex >= progress.pdfPageCount - 1
-
-            DocumentType.TXT,
-            DocumentType.FB2 -> false
-        }
 
     private fun displayError(
         throwable: Throwable,
@@ -2124,3 +2424,33 @@ class ReaderViewModel : ViewModel() {
         }
     }
 }
+
+private fun ReaderScreen.withLatestProgress(
+    progressByUri: Map<String, ReadingProgress>,
+): ReaderScreen {
+    val progress = when (this) {
+        is ReaderScreen.Epub -> progressByUri[document.uriString]
+        is ReaderScreen.Pdf -> progressByUri[document.uriString]
+        is ReaderScreen.Text -> progressByUri[document.uriString]
+        ReaderScreen.Home -> null
+    } ?: return this
+
+    return when (this) {
+        is ReaderScreen.Epub -> copy(
+            initialChapterIndex = progress.epubChapterIndex.coerceIn(0, (book.chapters.size - 1).coerceAtLeast(0)),
+            initialScrollFraction = progress.epubScrollFraction.coerceIn(0f, 1f),
+        )
+
+        is ReaderScreen.Pdf -> copy(
+            initialPageIndex = progress.pdfPageIndex.coerceAtLeast(0),
+            initialZoomScale = progress.pdfZoomScale.coerceAtLeast(1f),
+        )
+
+        is ReaderScreen.Text -> copy(
+            initialScrollFraction = progress.txtScrollFraction.coerceIn(0f, 1f),
+        )
+
+        ReaderScreen.Home -> this
+    }
+}
+

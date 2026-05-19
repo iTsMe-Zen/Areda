@@ -1,4 +1,4 @@
-package app.areada.reader
+package app.areada.reader.pdf
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -624,3 +624,4 @@ private fun pdfExtensionVersion(): Int =
     } else {
         0
     }
+

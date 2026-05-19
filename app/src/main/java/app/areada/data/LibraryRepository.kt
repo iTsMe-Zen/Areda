@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import androidx.documentfile.provider.DocumentFile
+import app.areada.reader.fb2.LocalTextExtractor
 import java.util.Locale
 
 object LibraryRepository {
@@ -296,11 +297,12 @@ object LibraryRepository {
         context: Context,
         root: LibraryRoot,
         relativePath: String,
+        baseName: String? = null,
     ): LibraryBookEntry? {
         val rootFolder = DocumentFile.fromTreeUri(context, Uri.parse(root.treeUriString))
             ?: return null
         val targetFolder = resolveFolder(rootFolder, relativePath)
-        val noteName = uniqueNoteName(targetFolder)
+        val noteName = uniqueNoteName(targetFolder, baseName)
         val noteFile = targetFolder.createFile("text/plain", noteName)
             ?: return null
         context.contentResolver.openOutputStream(noteFile.uri, "wt")?.use { output ->
@@ -317,15 +319,40 @@ object LibraryRepository {
         )
     }
 
+    fun findBookLocation(
+        context: Context,
+        roots: List<LibraryRoot>,
+        uriString: String,
+    ): LibraryBookLocation? {
+        if (uriString.isBlank()) {
+            return null
+        }
+
+        roots.forEach { root ->
+            val rootFolder = DocumentFile.fromTreeUri(context, Uri.parse(root.treeUriString))
+                ?: return@forEach
+            val folderRelativePath = findContainingFolderRelativePath(
+                folder = rootFolder,
+                uriString = uriString,
+                relativePath = "",
+            )
+            if (folderRelativePath != null) {
+                return LibraryBookLocation(
+                    root = root,
+                    folderRelativePath = folderRelativePath,
+                )
+            }
+        }
+        return null
+    }
+
     fun readText(
         context: Context,
         uri: Uri,
     ): String =
         runCatching {
             context.contentResolver.openInputStream(uri)?.use { input ->
-                input.bufferedReader(Charsets.UTF_8).use { reader ->
-                    reader.readText()
-                }
+                decodeLocalText(input.readBytes())
             }
         }.getOrDefault(null).orEmpty()
 
@@ -333,11 +360,35 @@ object LibraryRepository {
         context: Context,
         document: ReaderDocument,
     ): String =
+        readTextLikeDocumentContent(context, document).text
+
+    fun readTextLikeDocumentContent(
+        context: Context,
+        document: ReaderDocument,
+    ): TextDocumentContent =
         when (document.type) {
-            DocumentType.TXT -> readText(context, document.uri)
-            DocumentType.FB2 -> LocalTextExtractor.readFb2(context, document.uri)
+            DocumentType.TXT -> TextDocumentContent(text = readText(context, document.uri))
+            DocumentType.FB2 -> runCatching {
+                LocalTextExtractor.readFb2Document(context, document.uri)
+            }.getOrElse {
+                throw IllegalArgumentException("Unable to read that FB2.")
+            }.let { fb2 ->
+                val text = fb2.text.ifBlank {
+                    throw IllegalArgumentException("This FB2 does not contain readable text.")
+                }
+                val title = listOfNotNull(
+                    fb2.title?.takeIf { title -> title.isNotBlank() },
+                    fb2.author?.takeIf { author -> author.isNotBlank() },
+                ).joinToString(" - ").ifBlank { null }
+                TextDocumentContent(
+                    text = text,
+                    title = title,
+                )
+            }
+
             DocumentType.EPUB,
-            DocumentType.PDF -> ""
+            DocumentType.PDF,
+            DocumentType.ZIP -> TextDocumentContent(text = "")
         }
 
     fun saveText(
@@ -704,6 +755,7 @@ object LibraryRepository {
             lowerName.endsWith(".fb2") ||
                 lowerName.endsWith(".fb2.zip") ||
                 lowerName.endsWith(".fbz") -> DocumentType.FB2
+            lowerName.endsWith(".zip") -> DocumentType.ZIP
             else -> null
         }
     }
@@ -802,21 +854,29 @@ object LibraryRepository {
         }.getOrDefault("")
             .lowercase(Locale.ROOT)
 
-    private fun uniqueNoteName(folder: DocumentFile): String {
+    private fun uniqueNoteName(
+        folder: DocumentFile,
+        baseName: String? = null,
+    ): String {
         val existingNames = runCatching {
             folder.listFiles()
                 .mapNotNull { file -> file.name?.lowercase(Locale.ROOT) }
                 .toSet()
         }.getOrDefault(emptySet())
 
+        val cleanBaseName = baseName
+            ?.let(::targetTextFileName)
+            ?.substringBeforeLast('.', "")
+            ?.ifBlank { null }
+            ?: "Note"
         repeat(1000) { index ->
-            val name = if (index == 0) "Note.txt" else "Note ${index + 1}.txt"
+            val name = if (index == 0) "$cleanBaseName.txt" else "$cleanBaseName ${index + 1}.txt"
             if (name.lowercase(Locale.ROOT) !in existingNames) {
                 return name
             }
         }
 
-        return "Note ${System.currentTimeMillis()}.txt"
+        return "$cleanBaseName ${System.currentTimeMillis()}.txt"
     }
 
     private fun targetTextFileName(rawTitle: String): String? {
@@ -875,6 +935,47 @@ object LibraryRepository {
                 when {
                     child.uri.toString() == uriString && child.isFile -> child
                     child.isDirectory -> findFileByUri(child, uriString, depth + 1)
+                    else -> null
+                }
+            }.getOrNull()
+            if (found != null) {
+                return found
+            }
+        }
+        return null
+    }
+
+    private fun findContainingFolderRelativePath(
+        folder: DocumentFile,
+        uriString: String,
+        relativePath: String,
+        depth: Int = 0,
+    ): String? {
+        if (depth > MAX_SEARCH_DEPTH) {
+            return null
+        }
+
+        val children = runCatching { folder.listFiles() }.getOrDefault(emptyArray<DocumentFile>())
+        children.forEach { child ->
+            val found = runCatching {
+                when {
+                    child.isFile && child.uri.toString() == uriString -> relativePath
+                    child.isDirectory -> {
+                        val name = child.name?.trim().orEmpty()
+                        val childRelativePath = if (name.isBlank()) {
+                            relativePath
+                        } else if (relativePath.isBlank()) {
+                            name
+                        } else {
+                            "$relativePath/$name"
+                        }
+                        findContainingFolderRelativePath(
+                            folder = child,
+                            uriString = uriString,
+                            relativePath = childRelativePath,
+                            depth = depth + 1,
+                        )
+                    }
                     else -> null
                 }
             }.getOrNull()
@@ -949,3 +1050,4 @@ object LibraryRepository {
             if (index >= 0) cursor.getString(index) else null
         }
 }
+

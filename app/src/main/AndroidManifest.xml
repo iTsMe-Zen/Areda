@@ -33,6 +33,8 @@
                 <data android:mimeType="text/plain" />
                 <data android:mimeType="application/x-fictionbook+xml" />
                 <data android:mimeType="application/fb2+xml" />
+                <data android:mimeType="application/zip" />
+                <data android:mimeType="application/x-zip-compressed" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -51,6 +53,43 @@
                 <data
                     android:pathPattern=".*\\.fb2"
                     android:scheme="file" />
+                <data
+                    android:pathPattern=".*\\.fb2\\.zip"
+                    android:scheme="file" />
+                <data
+                    android:pathPattern=".*\\.fbz"
+                    android:scheme="file" />
+                <data
+                    android:pathPattern=".*\\.zip"
+                    android:scheme="file" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.OPENABLE" />
+
+                <data
+                    android:pathPattern=".*\\.pdf"
+                    android:scheme="content" />
+                <data
+                    android:pathPattern=".*\\.epub"
+                    android:scheme="content" />
+                <data
+                    android:pathPattern=".*\\.txt"
+                    android:scheme="content" />
+                <data
+                    android:pathPattern=".*\\.fb2"
+                    android:scheme="content" />
+                <data
+                    android:pathPattern=".*\\.fb2\\.zip"
+                    android:scheme="content" />
+                <data
+                    android:pathPattern=".*\\.fbz"
+                    android:scheme="content" />
+                <data
+                    android:pathPattern=".*\\.zip"
+                    android:scheme="content" />
             </intent-filter>
         </activity>
     </application>
